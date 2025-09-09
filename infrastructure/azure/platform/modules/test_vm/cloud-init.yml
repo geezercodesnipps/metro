@@ -1,0 +1,90 @@
+#cloud-config
+# Cloud-init configuration for Virtual WAN test VMs
+# This script installs network utilities for connectivity testing
+
+package_upgrade: true
+
+packages:
+  - curl
+  - wget
+  - net-tools
+  - iputils-ping
+  - traceroute
+  - nmap
+  - iperf3
+  - tcpdump
+  - dnsutils
+  - telnet
+  - netcat-openbsd
+  - htop
+  - azure-cli
+
+# Create test scripts
+write_files:
+  - path: /home/${admin_username}/connectivity-test.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      echo "=== Virtual WAN Connectivity Test ==="
+      echo "Timestamp: $(date)"
+      echo "VM Hostname: $(hostname)"
+      echo "VM IP Address: $(hostname -I | cut -d' ' -f1)"
+      echo ""
+      
+      echo "=== Network Configuration ==="
+      ip route show
+      echo ""
+      
+      echo "=== DNS Resolution Test ==="
+      nslookup google.com
+      echo ""
+      
+      echo "=== Internet Connectivity Test ==="
+      curl -s -o /dev/null -w "HTTP Status: %%{http_code}, Time: %%{time_total}s" https://google.com
+      echo ""
+      
+      echo "=== Azure Metadata Service Test ==="
+      curl -H Metadata:true "http://169.254.169.254/metadata/instance?api-version=2021-02-01" 2>/dev/null | jq '.'
+      echo ""
+      
+      if [ $# -gt 0 ]; then
+        echo "=== Testing connectivity to: $1 ==="
+        ping -c 4 $1
+        echo ""
+        traceroute $1 2>/dev/null || tracepath $1
+        echo ""
+        nc -zv $1 80 2>&1
+        nc -zv $1 443 2>&1
+      fi
+
+  - path: /home/${admin_username}/vwan-test-endpoints.txt
+    permissions: '0644'
+    content: |
+      # Virtual WAN Test Endpoints
+      # Add IP addresses of other test VMs here for cross-region testing
+      # Format: IP_ADDRESS DESCRIPTION
+      # Example:
+      # 10.0.100.4 westeurope-test-vm
+      # 10.1.100.4 uaenorth-test-vm
+
+# Set up periodic connectivity test
+runcmd:
+  - chown ${admin_username}:${admin_username} /home/${admin_username}/*.sh
+  - chown ${admin_username}:${admin_username} /home/${admin_username}/*.txt
+  - echo "# Virtual WAN Test VM - Run /home/${admin_username}/connectivity-test.sh for diagnostics" >> /etc/motd
+  - systemctl enable azure-walinuxagent
+  - systemctl start azure-walinuxagent
+
+# Final message
+final_message: |
+  Virtual WAN Test VM is ready!
+  
+  Login as: ${admin_username}
+  
+  Run connectivity tests with:
+  sudo /home/${admin_username}/connectivity-test.sh [target_ip]
+  
+  Check VM metadata:
+  curl -H Metadata:true "http://169.254.169.254/metadata/instance?api-version=2021-02-01"
+  
+  The system is ready for Virtual WAN connectivity testing.

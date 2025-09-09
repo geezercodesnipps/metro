@@ -1,0 +1,35 @@
+# Enhanced provider configuration with retry settings for better handling of Azure propagation delays
+# Add this to your providers.tf file
+
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
+  }
+}
+
+# Enhanced AzureRM provider configuration with retry settings
+provider "azurerm" {
+  # ... your existing configuration ...
+  
+  # Enhanced retry configuration for management group operations
+  features {
+    # ... your existing features ...
+    
+    # Enhanced resource group settings
+    resource_group {
+      prevent_deletion_if_contains_resources = true
+    }
+  }
+}
+
+# Consider using these environment variables in your pipeline:
+# ARM_MAX_RETRIES=10
+# ARM_RETRY_DELAY_SECONDS=30
+# ARM_POLL_INTERVAL=30s

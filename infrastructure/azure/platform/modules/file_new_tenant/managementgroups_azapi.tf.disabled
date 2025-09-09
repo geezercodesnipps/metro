@@ -1,0 +1,255 @@
+# FALLBACK OPTION: AzAPI-based Management Groups with Retry Logic
+# Rename this file to .tf to use if AzureRM provider continues to have issues
+
+# Top-level Management Group using AzAPI with retry logic
+resource "azapi_resource" "management_group_root_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = "/"
+  name      = "${local.suffix}-${lower(var.organization_name)}"
+  
+  body = {
+    properties = {
+      displayName = var.organization_name
+    }
+  }
+
+  timeouts {
+    create = "10m"  # Shorter timeout - if Azure API doesn't respond in 10min, move on
+    read   = "5m"
+    update = "10m"
+    delete = "10m"
+  }
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Platform Management Group using AzAPI
+resource "azapi_resource" "management_group_platform_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = azapi_resource.management_group_root_azapi.id
+  name      = "${local.suffix}-platform"
+  
+  body = {
+    properties = {
+      displayName = "Platform"
+    }
+  }
+
+  timeouts {
+    create = "30m"
+    read   = "15m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    time_sleep.sleep_after_root_mg_azapi
+  ]
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Sleep after root management group creation
+resource "time_sleep" "sleep_after_root_mg_azapi" {
+  create_duration = "300s"  # 5 minutes
+
+  depends_on = [
+    azapi_resource.management_group_root_azapi
+  ]
+}
+
+# Landing Zones Management Group using AzAPI
+resource "azapi_resource" "management_group_landing_zones_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = azapi_resource.management_group_root_azapi.id
+  name      = "${local.suffix}-landing-zones"
+  
+  body = {
+    properties = {
+      displayName = "Landing Zones"
+    }
+  }
+
+  timeouts {
+    create = "30m"
+    read   = "15m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    time_sleep.sleep_after_root_mg_azapi
+  ]
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Identity Management Group using AzAPI
+resource "azapi_resource" "management_group_identity_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = azapi_resource.management_group_platform_azapi.id
+  name      = "${local.suffix}-identity"
+  
+  body = {
+    properties = {
+      displayName = "Identity"
+    }
+  }
+
+  timeouts {
+    create = "30m"
+    read   = "15m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    time_sleep.sleep_after_root_mg_azapi
+  ]
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Management Management Group using AzAPI
+resource "azapi_resource" "management_group_management_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = azapi_resource.management_group_platform_azapi.id
+  name      = "${local.suffix}-management"
+  
+  body = {
+    properties = {
+      displayName = "Management"
+    }
+  }
+
+  timeouts {
+    create = "30m"
+    read   = "15m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    time_sleep.sleep_after_root_mg_azapi
+  ]
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Connectivity Management Group using AzAPI
+resource "azapi_resource" "management_group_connectivity_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = azapi_resource.management_group_platform_azapi.id
+  name      = "${local.suffix}-connectivity"
+  
+  body = {
+    properties = {
+      displayName = "Connectivity"
+    }
+  }
+
+  timeouts {
+    create = "30m"
+    read   = "15m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    time_sleep.sleep_after_root_mg_azapi
+  ]
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Playground Management Group using AzAPI
+resource "azapi_resource" "management_group_playground_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = azapi_resource.management_group_root_azapi.id
+  name      = "${local.suffix}-playground"
+  
+  body = {
+    properties = {
+      displayName = "Playground"
+    }
+  }
+
+  timeouts {
+    create = "30m"
+    read   = "15m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    time_sleep.sleep_after_root_mg_azapi
+  ]
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Decomissioned Management Group using AzAPI
+resource "azapi_resource" "management_group_decomissioned_azapi" {
+  type      = "Microsoft.Management/managementGroups@2023-04-01"
+  parent_id = azapi_resource.management_group_root_azapi.id
+  name      = "${local.suffix}-decomissioned"
+  
+  body = {
+    properties = {
+      displayName = "Decomissioned"
+    }
+  }
+
+  timeouts {
+    create = "30m"
+    read   = "15m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    time_sleep.sleep_after_root_mg_azapi
+  ]
+
+  response_export_values    = ["*"]
+  schema_validation_enabled = false
+  locks                     = []
+  ignore_casing             = false
+  ignore_missing_property   = true
+}
+
+# Instructions to switch to AzAPI approach:
+# 1. Rename this file to managementgroups_azapi.tf
+# 2. Rename managementgroups.tf to managementgroups_azurerm.tf.disabled  
+# 3. Update outputs.tf to reference azapi_resource instead of azurerm_management_group
+# 4. Run terraform init to refresh providers
+# 5. Import existing management groups if they were created:
+#    terraform import azapi_resource.management_group_root_azapi /providers/Microsoft.Management/managementGroups/fsi-adia

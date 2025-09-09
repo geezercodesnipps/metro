@@ -1,0 +1,97 @@
+# Alternative implementation using AzAPI provider for better handling of propagation delays
+# Uncomment and use this if the standard approach continues to fail
+
+# resource "azapi_resource" "management_group_policy_assignment_mcsb" {
+#   type      = "Microsoft.Authorization/policyAssignments@2023-04-01"
+#   parent_id = azurerm_management_group.management_group_root.id
+#   name      = "cloud-security-benchmark"
+#   
+#   body = jsonencode({
+#     properties = {
+#       policyDefinitionId = "/providers/microsoft.authorization/policysetdefinitions/1f3afdf9-d0c9-4c3d-847f-89da613e70a8"
+#       displayName        = "Microsoft Cloud Security Benchmark Initiative"
+#       description        = "This policy initiative is a group of policies that provides all-up compliance view of the Microsoft Cloud Security Benchmark (MCSB) for Azure."
+#       enforcementMode    = "Default"
+#       metadata = {
+#         version  = "57.43.0"
+#         category = "Security Center"
+#       }
+#       notScopes = []
+#       parameters = {
+#         autoProvisioningOfTheLogAnalyticsAgentShouldBeEnabledOnYourSubscriptionMonitoringEffect = {
+#           value = "Disabled"
+#         }
+#         useRbacRulesMonitoringEffect = {
+#           value = "Disabled"
+#         }
+#         vnetEnableDDoSProtectionMonitoringEffect = {
+#           value = "Disabled"
+#         }
+#         identityDesignateLessThanOwnersMonitoringEffect = {
+#           value = "Disabled"
+#         }
+#         sqlServersVirtualMachinesAdvancedDataSecurityMonitoringEffect = {
+#           value = "Disabled"
+#         }
+#         subscriptionsShouldHaveAContactEmailAddressForSecurityIssuesMonitoringEffect = {
+#           value = "Disabled"
+#         }
+#       }
+#     }
+#   })
+#   
+#   timeouts {
+#     create = "30m"
+#     read   = "15m"
+#     update = "25m"
+#     delete = "20m"
+#   }
+#   
+#   depends_on = [
+#     time_sleep.sleep_before_policy_assignments
+#   ]
+# }
+
+# # Sleep resource to ensure policy assignment is fully propagated before exemption
+# resource "time_sleep" "sleep_after_mcsb_assignment_azapi" {
+#   create_duration = "180s"  # 3 minutes wait for policy assignment propagation
+#   
+#   depends_on = [
+#     azapi_resource.management_group_policy_assignment_mcsb
+#   ]
+# }
+
+# resource "azapi_resource" "management_group_policy_exemption_mcsb" {
+#   type      = "Microsoft.Authorization/policyExemptions@2022-07-01-preview"
+#   parent_id = azurerm_management_group.management_group_root.id
+#   name      = "cloud-security-benchmark"
+#   
+#   body = jsonencode({
+#     properties = {
+#       policyAssignmentId = azapi_resource.management_group_policy_assignment_mcsb.id
+#       displayName        = "Microsoft Cloud Security Benchmark Exemption"
+#       description        = "This policy exemption disables policies that are in conflict with platform capabilities and requirements."
+#       exemptionCategory  = "Waiver"
+#       expiresOn          = null
+#       metadata = {
+#         version  = "57.43.0"
+#         category = "Security Center"
+#       }
+#       policyDefinitionReferenceIds = [
+#         "storageAccountShouldUseAPrivateLinkConnectionMonitoringEffect",
+#         "privateEndpointShouldBeConfiguredForKeyVaultMonitoringEffect"
+#       ]
+#     }
+#   })
+#   
+#   timeouts {
+#     create = "20m"
+#     read   = "10m"
+#     update = "15m"
+#     delete = "15m"
+#   }
+#   
+#   depends_on = [
+#     time_sleep.sleep_after_mcsb_assignment_azapi
+#   ]
+# }
