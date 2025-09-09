@@ -1,0 +1,81 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Audit-Compute-AzureHybridBenefit",
+  "properties": {
+    "displayName": "Managed disks should disable public network access",
+    "description": "Disabling public network access improves security by ensuring that a managed disk isn't exposed on the public internet. Creating private endpoints can limit exposure of managed disks. Learn more at: https://aka.ms/disksprivatelinksdoc.",
+    "policyType": "Custom",
+    "mode": "All",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Compute"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Disabled"
+        ],
+        "defaultValue": "Audit"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "in": [
+              "Microsoft.Compute/virtualMachines",
+              "Microsoft.Compute/virtualMachineScaleSets"
+            ]
+          },
+          {
+            "equals": "MicrosoftWindowsServer",
+            "field": "Microsoft.Compute/imagePublisher"
+          },
+          {
+            "equals": "WindowsServer",
+            "field": "Microsoft.Compute/imageOffer"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Compute/imageSKU",
+                "like": "2008-R2-SP1*"
+              },
+              {
+                "field": "Microsoft.Compute/imageSKU",
+                "like": "2012-*"
+              },
+              {
+                "field": "Microsoft.Compute/imageSKU",
+                "like": "2016-*"
+              },
+              {
+                "field": "Microsoft.Compute/imageSKU",
+                "like": "2019-*"
+              },
+              {
+                "field": "Microsoft.Compute/imageSKU",
+                "like": "2022-*"
+              }
+            ]
+          },
+          {
+            "field": "Microsoft.Compute/licenseType",
+            "notEquals": "Windows_Server"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

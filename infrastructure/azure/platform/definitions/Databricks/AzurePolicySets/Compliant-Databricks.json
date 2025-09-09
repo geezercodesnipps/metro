@@ -1,0 +1,317 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Compliant-Databricks",
+  "properties": {
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Databricks"
+    },
+    "policyType": "Custom",
+    "displayName": "Enforce secure-by-default Databricks for regulated industries",
+    "description": "This policy initiative is a group of policies that ensures Databricks is compliant per regulated Landing Zones",
+    "policyDefinitionGroups": [
+      {
+        "name": "Encryption",
+        "category": "Data Protection",
+        "displayName": "Ensure compliance for purge protection, soft delete, and key rotation",
+        "description": "Policy to ensure compliance for purge protection, soft delete, and key rotation"
+      },
+      {
+        "name": "Network",
+        "category": "Network Security",
+        "displayName": "Ensure Event Hub is not accessible over the public internet",
+        "description": "Policy to ensure Event Hub is not accessible over the public internet"
+      },
+      {
+        "name": "Identity",
+        "category": "Identity Management",
+        "displayName": "Ensure usage of centralized identity and auhtorization system for Event Hub",
+        "description": "Policy to ensure Event Hub is not using local authorization"
+      },
+      {
+        "name": "Logging",
+        "category": "Logging and Threat Detection",
+        "displayName": "Ensure Event Hub is logging all events to Log Analytics",
+        "description": "Policy to ensure Event Hub is logging all events to Log Analytics workspace"
+      }
+    ],
+    "parameters": {
+      "databricksVirtualNetwork": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksEnableNoPublicIp": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksSkuName": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksDiagnostics": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "databricksDiagnosticsProfileName": {
+        "type": "string",
+        "defaultValue": "AzureDatabricksServicesDiagnosticsLogsToWorkspace"
+      },
+      "databricksDiagnosticsLogAnalytics": {
+        "type": "string",
+        "metadata": {
+          "displayName": "Log Analytics workspace",
+          "description": "Select Log Analytics workspace from dropdown list. If this workspace is outside of the scope of the assignment you must manually grant 'Log Analytics Contributor' permissions (or similar) to the policy assignment's principal ID.",
+          "strongType": "omsWorkspace",
+          "assignPermissions": true
+        }
+      },
+      "databricksDiagnosticsLogsEnabled": {
+        "type": "boolean",
+        "defaultValue": true
+      },
+      "databricksPublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksDefaultStorageFirewall": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksAutomaticClusterUpdate": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksComplianceSecurityProfile": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksComplianceSecurityProfileStandards": {
+        "type": "array",
+        "defaultValue": []
+      },
+      "databricksEncryptionDbfs": {
+        "type": "string",
+        "defaultValue": "Audit"
+      },
+      "databricksEncryptionManagedDisk": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksEncryptionManagedServices": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksEnhancedSecurityMonitoring": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksPrepareEncryption": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksRequiredNsgRules": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "databricksRequireInfrastructureEncryption": {
+        "type": "string",
+        "defaultValue": "Deny"
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/9c25c9e4-ee12-4882-afd2-11fb9d87893f",
+        "policyDefinitionReferenceId": "Deny-Databricks-VirtualNetwork",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksVirtualNetwork')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/51c1490f-3319-459c-bbbc-7f391bbed753",
+        "policyDefinitionReferenceId": "Deny-Databricks-EnableNoPublicIp",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksEnableNoPublicIp')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/2cc2c3b5-c2f8-45aa-a9e6-f90d85ae8352",
+        "policyDefinitionReferenceId": "Deny-Databricks-SkuName",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksSkuName')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/23057b42-ca8d-4aa0-a3dc-96a98b5b5a3d",
+        "policyDefinitionReferenceId": "Dine-Databricks-Diagnostics",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksDiagnostics')]"
+          },
+          "profileName": {
+            "value": "[parameters('databricksDiagnosticsProfileName')]"
+          },
+          "logAnalytics": {
+            "value": "[parameters('databricksDiagnosticsLogAnalytics')]"
+          },
+          "logsEnabled": {
+            "value": "[parameters('databricksDiagnosticsLogsEnabled')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/0e7849de-b939-4c50-ab48-fc6b0f5eeba2",
+        "policyDefinitionReferenceId": "Deny-Databricks-PublicNetworkAccess",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksPublicNetworkAccess')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-AutomaticClusterUpdate",
+        "policyDefinitionReferenceId": "Deny-Databricks-AutomaticClusterUpdate",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksAutomaticClusterUpdate')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-ComplianceSecurityProfile",
+        "policyDefinitionReferenceId": "Deny-Databricks-ComplianceSecurityProfile",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksComplianceSecurityProfile')]"
+          },
+          "complianceStandards": {
+            "value": "[parameters('databricksComplianceSecurityProfileStandards')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-DefaultStorageFirewall",
+        "policyDefinitionReferenceId": "Deny-Databricks-DefaultStorageFirewall",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksDefaultStorageFirewall')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Audit-Databricks-EncryptionDbfs",
+        "policyDefinitionReferenceId": "Audit-Databricks-EncryptionDbfs",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksEncryptionDbfs')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-EncryptionManagedDisk",
+        "policyDefinitionReferenceId": "Deny-Databricks-EncryptionManagedDisk",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksEncryptionManagedDisk')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-EncryptionManagedServices",
+        "policyDefinitionReferenceId": "Deny-Databricks-EncryptionManagedServices",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksEncryptionManagedServices')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-EnhancedSecurityMonitoring",
+        "policyDefinitionReferenceId": "Deny-Databricks-EnhancedSecurityMonitoring",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksEnhancedSecurityMonitoring')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-PrepareEncryption",
+        "policyDefinitionReferenceId": "Deny-Databricks-PrepareEncryption",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksPrepareEncryption')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-RequiredNsgRules",
+        "policyDefinitionReferenceId": "Deny-Databricks-RequiredNsgRules",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksRequiredNsgRules')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Databricks-RequireInfrastructureEncryption",
+        "policyDefinitionReferenceId": "Deny-Databricks-RequireInfrastructureEncryption",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('databricksRequireInfrastructureEncryption')]"
+          }
+        }
+      }
+    ]
+  }
+}

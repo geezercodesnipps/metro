@@ -1,0 +1,55 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-AppService-without-BYOK",
+  "properties": {
+    "displayName": "App Service certificates must be stored in Key Vault",
+    "description": "App Service (including Logic apps and Function apps) must use certificates stored in Key Vault",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "metadata": {
+      "version": "2.0.0",
+      "category": "App Service"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Disabled",
+          "Deny"
+        ],
+        "defaultValue": "Audit"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Web/certificates"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Web/certificates/keyVaultId",
+                "exists": "false"
+              },
+              {
+                "field": "Microsoft.Web/certificates/keyVaultSecretName",
+                "exists": "false"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

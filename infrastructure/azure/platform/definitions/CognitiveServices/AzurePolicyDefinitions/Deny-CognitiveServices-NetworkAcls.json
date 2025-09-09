@@ -1,0 +1,59 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-CognitiveServices-NetworkAcls",
+  "properties": {
+    "displayName": "Network ACLs should be restricted for Cognitive Services",
+    "mode": "Indexed",
+    "policyType": "Custom",
+    "description": "Azure Cognitive Services should not allow adding individual IPs or virtual network rules to the service-level firewall. Enable this to restrict inbound network access and enforce the usage of private endpoints.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Cognitive Services"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Deny",
+          "Audit",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.CognitiveServices/accounts"
+          },
+          {
+            "anyOf": [
+              {
+                "count": {
+                  "field": "Microsoft.CognitiveServices/accounts/networkAcls.ipRules[*]"
+                },
+                "greater": 0
+              },
+              {
+                "count": {
+                  "field": "Microsoft.CognitiveServices/accounts/networkAcls.virtualNetworkRules[*]"
+                },
+                "greater": 0
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

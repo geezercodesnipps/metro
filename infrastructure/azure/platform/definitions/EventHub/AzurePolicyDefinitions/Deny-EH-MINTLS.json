@@ -1,0 +1,63 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-EH-MINTLS",
+  "properties": {
+    "displayName": "Event Hub namespaces should use a valid TLS version",
+    "mode": "Indexed",
+    "policyType": "Custom",
+    "description": "Event Hub namespaces should use a valid TLS version.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Event Hub"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Audit"
+      },
+      "minTlsVersion": {
+        "type": "string",
+        "metadata": {
+          "displayName": "Minimum TLS Version",
+          "description": "Minimum TLS version to be used by Event Hub"
+        },
+        "defaultValue": "1.2"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.EventHub/namespaces"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.EventHub/namespaces/minimumTlsVersion",
+                "notEquals": "[parameters('minTlsVersion')]"
+              },
+              {
+                "field": "Microsoft.EventHub/namespaces/minimumTlsVersion",
+                "exists": "false"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

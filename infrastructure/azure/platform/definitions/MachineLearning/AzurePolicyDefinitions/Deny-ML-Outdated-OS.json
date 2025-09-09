@@ -1,0 +1,51 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-ML-Outdated-OS",
+  "properties": {
+    "displayName": "Audit/Deny Azure Machine Learning Compute Instances with an outdated operating system",
+    "mode": "All",
+    "policyType": "Custom",
+    "description": "Compute instances are non-compliant if the instance has an outdated operating system version. For more information, visit http://aka.ms/azureml-ci-updates/.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Machine Learning"
+    },
+    "parameters": {
+      "effects": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "The effect determines what happens when the policy rule is evaluated to match."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Audit"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.MachineLearningServices/workspaces/computes"
+          },
+          {
+            "field": "Microsoft.MachineLearningServices/workspaces/computes/computeType",
+            "equals": "ComputeInstance"
+          },
+          {
+            "field": "Microsoft.MachineLearningServices/workspaces/computes/osImageMetadata.isLatestOsImageVersion",
+            "equals": "false"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effects')]"
+      }
+    }
+  }
+}

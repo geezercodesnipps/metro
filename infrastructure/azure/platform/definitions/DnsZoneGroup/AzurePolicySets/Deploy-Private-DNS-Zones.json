@@ -1,0 +1,79 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Deploy-Private-DNS-Zones",
+  "properties": {
+    "displayName": "Configure Azure PaaS services to use private DNS zones",
+    "description": "This policy initiative is a group of policies that ensures private endpoints to Azure PaaS services are integrated with Azure Private DNS zones",
+    "policyType": "Custom",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Network"
+    },
+    "policyDefinitionGroups": [
+      {
+        "name": "Encryption",
+        "category": "Data Protection",
+        "displayName": "Ensure Key Vault is using secure encryption",
+        "description": "Policy to ensure Key Vault is using secure encryption"
+      },
+      {
+        "name": "Network",
+        "category": "Network Security",
+        "displayName": "Ensure Key Vault is not accessible over the public internet",
+        "description": "Policy to ensure Key Vault is not accessible over the public internet"
+      },
+      {
+        "name": "Identity",
+        "category": "Identity Management",
+        "displayName": "Ensure usage of centralized identity and auhtorization system for Key Vault",
+        "description": "Policy to ensure Key Vault is not using local authorization"
+      },
+      {
+        "name": "Logging",
+        "category": "Logging and Threat Detection",
+        "displayName": "Ensure Key Vault is logging all events to Log Analytics",
+        "description": "Policy to ensure Key Vault is logging all events to Log Analytics workspace"
+      }
+    ],
+    "parameters": {
+      "effect": {
+        "type": "string",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "DeployIfNotExists",
+          "Disabled"
+        ],
+        "defaultValue": "DeployIfNotExists"
+      },
+      "privateDnsZoneIdVault": {
+        "type": "string",
+        "metadata": {
+          "displayName": "azureCognitiveSearchPrivateDnsZoneId",
+          "strongType": "Microsoft.Network/privateDnsZones",
+          "description": "Private DNS Zone Identifier"
+        }
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Dine-DNSZoneGroup-KeyVault-Vault",
+        "policyDefinitionReferenceId": "DeployIfNotExists-DNSZoneGroup-KeyVault-Vault",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          },
+          "privateDnsZoneId": {
+            "value": "[parameters('privateDnsZoneIdVault')]"
+          }
+        },
+        "groupNames": [
+          "Network"
+        ]
+      }
+    ]
+  }
+}

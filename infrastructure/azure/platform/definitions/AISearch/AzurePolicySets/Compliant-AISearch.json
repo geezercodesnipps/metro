@@ -1,0 +1,162 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Compliant-AISearch",
+  "properties": {
+    "policyType": "Custom",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Cognitive Search"
+    },
+    "displayName": "Enforce secure-by-default AI Search for regulated industries",
+    "description": "This policy initiative is a group of policies that ensures Cognitive Search is compliant per regulated Landing Zones",
+    "policyDefinitionGroups": [
+      {
+        "name": "Encryption",
+        "category": "Data Protection",
+        "displayName": "Ensure compliance for data encryption, protection, and recovery for AI Search",
+        "description": "Policy to ensure data protection for Cognitive Search"
+      },
+      {
+        "name": "Network",
+        "category": "Network Security",
+        "displayName": "Ensure AI Search is not accessible over the public internet",
+        "description": "Policy to ensure Cognitive Search not accessible over the public internet"
+      },
+      {
+        "name": "Identity",
+        "category": "Identity Management",
+        "displayName": "Ensure usage of centralized identity and auhtorization system for AI Search",
+        "description": "Policy to ensure AI Search is not using local authorization"
+      },
+      {
+        "name": "Logging",
+        "category": "Logging and Threat Detection",
+        "displayName": "Ensure AI Search is logging all events to Log Analytics",
+        "description": "Policy to ensure AI Search is logging all events to Log Analytics workspace"
+      }
+    ],
+    "parameters": {
+      "cognitiveSearchDiagnostics": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "cognitiveSearchLogAnalyticsResourceId": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "cognitiveSearchSku": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "cognitiveSearchPublicEndpoint": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "cognitiveSearchLocalAuth": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },      "cognitiveSearchCmk": {
+        "type": "string",
+        "defaultValue": "AuditIfNotExists"
+      },
+      "modifyCognitiveSearchLocalAuth": {
+        "type": "string",
+        "defaultValue": "Modify"
+      },
+      "modifyCognitiveSearchPublicEndpoint": {
+        "type": "string",
+        "defaultValue": "Modify"
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Dine-Diagnostics-AISearch",
+        "policyDefinitionReferenceId": "Dine-Diagnostics-AISearch",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('cognitiveSearchDiagnostics')]"
+          },
+          "logAnalytics": {
+            "value": "[parameters('cognitiveSearchLogAnalyticsResourceId')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/a049bf77-880b-470f-ba6d-9f21c530cf83",
+        "policyDefinitionReferenceId": "Deny-CognitiveSearch-SKU",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('cognitiveSearchSku')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/ee980b6d-0eca-4501-8d54-f6290fd512c3",
+        "policyDefinitionReferenceId": "Deny-CognitiveSearch-PublicEndpoint",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('cognitiveSearchPublicEndpoint')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/6300012e-e9a4-4649-b41f-a85f5c43be91",
+        "policyDefinitionReferenceId": "Deny-CongitiveSearch-LocalAuth",
+        "groupNames": [
+          "Identity"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('cognitiveSearchLocalAuth')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/76a56461-9dc0-40f0-82f5-2453283afa2f",
+        "policyDefinitionReferenceId": "Deny-CognitiveSearch-Cmk",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('cognitiveSearchCmk')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/4eb216f2-9dba-4979-86e6-5d7e63ce3b75",
+        "policyDefinitionReferenceId": "Modify-CogntiveSearch-LocalAuth",
+        "groupNames": [
+          "Identity"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('modifyCognitiveSearchLocalAuth')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/9cee519f-d9c1-4fd9-9f79-24ec3449ed30",
+        "policyDefinitionReferenceId": "Modify-CogntiveSearch-PublicEndpoint",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('modifyCognitiveSearchPublicEndpoint')]"
+          }
+        }
+      }
+    ]
+  }
+}

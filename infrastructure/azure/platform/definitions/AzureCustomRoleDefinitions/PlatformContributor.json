@@ -1,0 +1,31 @@
+{
+  "type": "Microsoft.Authorization/roleDefinitions",
+  "apiVersion": "2022-04-01",
+  "name": "Platform Contributor",
+  "scope": "${scope_id_root}",
+  "properties": {
+    "roleName": "Platform Contributor",
+    "description": "Custom Role that grants full access to manage all Platform resources, but does not allow you to assign roles in Azure RBAC, manage assignments in Azure Blueprints, or share image galleries.",
+    "type": "customRole",
+    "permissions": [
+      {
+        "actions": [
+          "*"
+        ],
+        "notActions": [
+          "Microsoft.Authorization/*/Delete",
+          "Microsoft.Authorization/*/Write",
+          "Microsoft.Authorization/elevateAccess/Action",
+          "Microsoft.Blueprint/blueprintAssignments/write",
+          "Microsoft.Blueprint/blueprintAssignments/delete",
+          "Microsoft.Compute/galleries/share/action"
+        ],
+        "dataActions": [],
+        "notDataActions": []
+      }
+    ],
+    "assignableScopes": [
+      "${scope_id_root}"
+    ]
+  }
+}

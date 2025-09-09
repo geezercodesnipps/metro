@@ -1,0 +1,82 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-Databricks-ComplianceSecurityProfile",
+  "properties": {
+    "displayName": "Enforce compliance security profiles for Databricks workspaces",
+    "description": "Enforces the use of compliance security profiles such as HIPAA and PCI-DSS for Databricks workspaces.",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Databricks"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Disabled",
+          "Deny"
+        ],
+        "defaultValue": "Deny"
+      },
+      "complianceStandards": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "NONE",
+          "HIPAA",
+          "PCI_DSS"
+        ],
+        "defaultValue": []
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Databricks/workspaces"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Databricks/workspaces/enhancedSecurityCompliance.complianceSecurityProfile.value",
+                "exists": false
+              },
+              {
+                "field": "Microsoft.Databricks/workspaces/enhancedSecurityCompliance.complianceSecurityProfile.value",
+                "notEquals": "Enabled"
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Databricks/workspaces/enhancedSecurityCompliance.complianceSecurityProfile.complianceStandards[*]",
+                  "where": {
+                    "allOf": [
+                      {
+                        "field": "Microsoft.Databricks/workspaces/enhancedSecurityCompliance.complianceSecurityProfile.complianceStandards[*]",
+                        "notIn": "[parameters('complianceStandards')]"
+                      }
+                    ]
+                  }
+                },
+                "greater": 0
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

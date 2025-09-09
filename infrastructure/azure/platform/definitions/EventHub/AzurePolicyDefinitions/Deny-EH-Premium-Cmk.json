@@ -1,0 +1,53 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-EH-Premium-CMK",
+  "properties": {
+    "displayName": "Event Hub namespaces (Premium) should use a customer-managed key for encryption",
+    "mode": "Indexed",
+    "policyType": "Custom",
+    "description": "Event Hub namespaces (Premium) should use a customer-managed key for encryption.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Event Hub"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Audit"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.EventHub/namespaces"
+          },
+          {
+            "field": "Microsoft.EventHub/namespaces/sku.name",
+            "equals": "Premium"
+          },
+          {
+            "not": {
+              "field": "Microsoft.EventHub/namespaces/encryption.keySource",
+              "equals": "Microsoft.Keyvault"
+            }
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

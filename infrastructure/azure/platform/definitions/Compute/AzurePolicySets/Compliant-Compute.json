@@ -1,0 +1,146 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Compliant-Compute",
+  "properties": {
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Compute"
+    },
+    "policyType": "Custom",
+    "displayName": "Enforce secure-by-default Compute for regulated industries",
+    "description": "This policy initiative is a group of policies that ensures Compute is compliant per regulated Landing Zones",
+    "policyDefinitionGroups": [
+      {
+        "name": "Encryption",
+        "category": "Data Protection",
+        "displayName": "Ensure compliance for purge protection, soft delete, and key rotation",
+        "description": "Policy to ensure compliance for purge protection, soft delete, and key rotation"
+      },
+      {
+        "name": "Network",
+        "category": "Network Security",
+        "displayName": "Ensure Compute is not accessible over the public internet",
+        "description": "Policy to ensure Compute is not accessible over the public internet"
+      },
+      {
+        "name": "Identity",
+        "category": "Identity Management",
+        "displayName": "Ensure usage of centralized identity and auhtorization system for Compute",
+        "description": "Policy to ensure Compute is not using local authorization"
+      },
+      {
+        "name": "Logging",
+        "category": "Logging and Threat Detection",
+        "displayName": "Ensure Compute is logging all events to Log Analytics",
+        "description": "Policy to ensure Compute is logging all events to Log Analytics workspace"
+      },
+      {
+        "name": "Cost",
+        "category": "Cost Optimization",
+        "displayName": "Ensure Compute cost optimized",
+        "description": "Policy to ensure Compute is cost optimized"
+      }
+    ],
+    "parameters": {
+      "diskDoubleEncryption": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "managedDiskPublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "osAndDataDiskCmk": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "vmAndVmssEncryptionHost": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "computeAzureHybridBenefit": {
+        "type": "string",
+        "defaultValue": "Audit"
+      },
+      "disksUnusedResourcesCostOptimization": {
+        "type": "string",
+        "defaultValue": "Audit"
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/fc4d8e41-e223-45ea-9bf5-eada37891d87",
+        "policyDefinitionReferenceId": "Deny-VmAndVmss-Encryption-Host",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('vmAndVmssEncryptionHost')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/702dd420-7fcc-42c5-afe8-4026edd20fe0",
+        "policyDefinitionReferenceId": "Deny-OsAndDataDisk-Cmk",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('osAndDataDiskCmk')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Disk-Public-Endpoint",
+        "policyDefinitionReferenceId": "Deny-ManagedDisk-Public-Network-Access",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('managedDiskPublicNetworkAccess')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/ca91455f-eace-4f96-be59-e6e2c35b4816",
+        "policyDefinitionReferenceId": "Deny-Disk-Double-Encryption",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('diskDoubleEncryption')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Audit-Compute-AzureHybridBenefit",
+        "policyDefinitionReferenceId": "Audit-Compute-AzureHybridBenefit",
+        "groupNames": [
+          "Cost"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('computeAzureHybridBenefit')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Audit-Disks-UnusedResourcesCostOptimization",
+        "policyDefinitionReferenceId": "Audit-Disks-UnusedResourcesCostOptimization",
+        "groupNames": [
+          "Cost"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('disksUnusedResourcesCostOptimization')]"
+          }
+        }
+      }
+    ]
+  }
+}

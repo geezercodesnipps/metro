@@ -1,0 +1,327 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Deploy-DefenderSql",
+  "properties": {
+    "description": "Configure SQL VM and Arc-enabled SQL Servers to install Microsoft Defender for SQL and AMA with a user-defined LAW",
+    "displayName": "Configure SQL VM and Arc-enabled SQL Servers to install Microsoft Defender for SQL and AMA with a user-defined LAW",
+    "policyType": "Custom",
+    "metadata": {
+      "version": "3.0.0",
+      "category": "Security Center"
+    },
+    "policyDefinitionGroups": [
+      {
+        "name": "Security",
+        "category": "Security",
+        "displayName": "Ensure Defender for Cloud is enabled with required settings on the subscription",
+        "description": "Policy to ensure Defender for Cloud is enabled with required settings on the subscription"
+      }
+    ],
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "DeployIfNotExists",
+          "Disabled"
+        ],
+        "defaultValue": "DeployIfNotExists"
+      },
+      "workspaceRegion": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Workspace region",
+          "description": "Region of the Log Analytics workspace destination for the Data Collection Rule.",
+          "strongType": "location"
+        }
+      },
+      "bringYourOwnDcr": {
+        "type": "Boolean",
+        "metadata": {
+          "displayName": "Bring your own DCR",
+          "description": "Enable or disable the use of a user-defined Data Collection Rule."
+        },
+        "allowedValues": [
+          true,
+          false
+        ],
+        "defaultValue": false
+      },
+      "dcrResourceId": {
+        "type": "String",
+        "metadata": {
+          "displayName": "DCR Resource Id",
+          "description": "Resource Id of the user-defined Data Collection Rule."
+        }
+      },
+      "userWorkspaceResourceId": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Workspace Resource Id",
+          "description": "Workspace resource Id of the Log Analytics workspace destination for the Data Collection Rule.",
+          "strongType": "omsWorkspace"
+        }
+      },
+      "userWorkspaceId": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Workspace Id",
+          "description": "Workspace Id of the Log Analytics workspace destination for the Data Collection Rule."
+        }
+      },
+      "enableCollectionOfSqlQueriesForSecurityResearch": {
+        "type": "Boolean",
+        "metadata": {
+          "displayName": "Enable collection of SQL queries for security research",
+          "description": "Enable or disable the collection of SQL queries for security research."
+        },
+        "allowedValues": [
+          true,
+          false
+        ],
+        "defaultValue": false
+      },
+      "bringYourOwnUserAssignedManagedIdentity": {
+        "type": "Boolean",
+        "metadata": {
+          "displayName": "BYO User Assigned Managed Identity",
+          "description": "Enable bring-your-own user assigned identity for Azure Monitor Agent."
+        },
+        "allowedValues": [
+          true,
+          false
+        ],
+        "defaultValue": false
+      },
+      "userAssignedIdentityResourceId": {
+        "type": "String",
+        "metadata": {
+          "displayName": "User Assigned Managed Identity Resource ID",
+          "description": "The resource ID of the user assigned managed identity."
+        },
+        "defaultValue": ""
+      },
+      "builtInIdentityResourceGroupLocation": {
+        "type": "String",
+        "metadata": {
+          "displayName": "RG Location",
+          "description": "The location of the resource group created by the policy for the built-in user assigned managed identity."
+        },
+        "defaultValue": ""
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionReferenceId": "defenderForSqlArcAma",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/3592ff98-9787-443a-af59-4505d0fe0786",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlArcMdsql",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/65503269-6a54-4553-8a28-0065a8e6d929",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlArcMdsqlDcr",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/63d03cbd-47fd-4ee1-8a1c-9ddf07303de0",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          },
+          "userWorkspaceResourceId": {
+            "value": "[parameters('userWorkspaceResourceId')]"
+          },
+          "workspaceRegion": {
+            "value": "[parameters('workspaceRegion')]"
+          },
+          "userWorkspaceId": {
+            "value": "[parameters('userWorkspaceId')]"
+          },
+          "enableCollectionOfSqlQueriesForSecurityResearch": {
+            "value": "[parameters('enableCollectionOfSqlQueriesForSecurityResearch')]"
+          },
+          "bringYourOwnDcr": {
+            "value": "[parameters('bringYourOwnDcr')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlArcDcrAssociation",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/2227e1f1-23dd-4c3a-85a9-7024a401d8b2",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          },
+          "workspaceRegion": {
+            "value": "[parameters('workspaceRegion')]"
+          },
+          "userWorkspaceId": {
+            "value": "[parameters('userWorkspaceId')]"
+          },
+          "bringYourOwnDcr": {
+            "value": "[parameters('bringYourOwnDcr')]"
+          },
+          "dcrResourceId": {
+            "value": "[parameters('dcrResourceId')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlMdsqlDcr",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/04754ef9-9ae3-4477-bf17-86ef50026304",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          },
+          "userWorkspaceResourceId": {
+            "value": "[parameters('userWorkspaceResourceId')]"
+          },
+          "workspaceRegion": {
+            "value": "[parameters('workspaceRegion')]"
+          },
+          "userWorkspaceId": {
+            "value": "[parameters('userWorkspaceId')]"
+          },
+          "enableCollectionOfSqlQueriesForSecurityResearch": {
+            "value": "[parameters('enableCollectionOfSqlQueriesForSecurityResearch')]"
+          },
+          "bringYourOwnDcr": {
+            "value": "[parameters('bringYourOwnDcr')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlServerArcDcrInstallation",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/da0fd392-9669-4ad4-b32c-ca46aaa6c21f",
+        "groupNames": [
+          "Security"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "Disabled"
+          },
+          "enableCollectionOfSqlQueriesForSecurityResearch": {
+            "value": "[parameters('enableCollectionOfSqlQueriesForSecurityResearch')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlServerArcDcrAssociation",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/cbdd12e1-193a-445c-9926-560118c6daaa",
+        "groupNames": [
+          "Security"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "Disabled"
+          }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlAma",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/f91991d1-5383-4c95-8ee5-5ac423dd8bb1",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          },
+          "bringYourOwnUserAssignedManagedIdentity": {
+            "value": "[parameters('bringYourOwnUserAssignedManagedIdentity')]"
+          },
+          "userAssignedIdentityResourceId": {
+            "value": "[parameters('userAssignedIdentityResourceId')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlMdsql",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/ddca0ddc-4e9d-4bbb-92a1-f7c4dd7ef7ce",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          },
+          "workspaceRegion": {
+            "value": "[parameters('workspaceRegion')]"
+          },
+          "userWorkspaceId": {
+            "value": "[parameters('userWorkspaceId')]"
+          },
+          "bringYourOwnDcr": {
+            "value": "[parameters('bringYourOwnDcr')]"
+          },
+          "dcrResourceId": {
+            "value": "[parameters('dcrResourceId')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlVmDcrInstallation",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/c859b78a-a128-4376-a838-e97ce6625d16",
+        "parameters": {
+          "effect": {
+            "value": "Disabled"
+          },
+          "enableCollectionOfSqlQueriesForSecurityResearch": {
+            "value": "[parameters('enableCollectionOfSqlQueriesForSecurityResearch')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      },
+      {
+        "policyDefinitionReferenceId": "defenderForSqlVmUaiAssignment",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/09963c90-6ee7-4215-8d26-1cc660a1682f",
+        "parameters": {
+          "effect": {
+            "value": "[parameters('effect')]"
+          },
+          "bringYourOwnUserAssignedManagedIdentity": {
+            "value": "[parameters('bringYourOwnUserAssignedManagedIdentity')]"
+          },
+          "userAssignedIdentityResourceId": {
+            "value": "[parameters('userAssignedIdentityResourceId')]"
+          },
+          "builtInIdentityResourceGroupLocation": {
+            "value": "[parameters('builtInIdentityResourceGroupLocation')]"
+          }
+        },
+        "groupNames": [
+          "Security"
+        ]
+      }
+    ]
+  }
+}
