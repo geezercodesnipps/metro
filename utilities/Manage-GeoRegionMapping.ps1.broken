@@ -1,0 +1,517 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+    Manages geo_region_mapping in Terraform vars.tfvars file for Azure DevOps pipelines.
+
+.DESCRIPTION
+    This script provides functionality to add or remove geographic regions and their associated
+    Azure regions in the Terraform configuration. It can handle both entire geo operations
+    and individual region operations within a geo.
+
+.PARAMETER Action
+    The action to perform: 'AddGeo', 'RemoveGeo', 'AddRegion', 'RemoveRegion'
+
+.PARAMETER VarsFilePath
+    Path to the vars.tfvars file
+
+.PARAMETER GeoName
+    Name of the geographic region (EMEA, UAE)
+
+.PARAMETER RegionName
+    Name of the Azure region (northeurope, westeurope, uaenorth, uaesouth)
+
+.PARAMETER GeoPlatformSubscriptionId
+    Subscription ID for the geo platform (required when adding a new geo)
+
+.PARAMETER GeoPlatformLocation
+    Platform location for the geo (required when adding a new geo)
+
+.PARAMETER RegionSubscriptionId
+    Subscription ID for the region (required when adding a new region)
+
+.PARAMETER Environment
+    Environment name (default: "dev")
+
+.EXAMPLE
+    .\Manage-GeoRegionMapping.ps1 -Action "AddGeo" -VarsFilePath "config/Tenant001/vars.tfvars" -GeoName "EMEA" -GeoPlatformSubscriptionId "sub-id" -GeoPlatformLocation "westeurope"
+
+.EXAMPLE
+    .\Manage-GeoRegionMapping.ps1 -Action "AddRegion" -VarsFilePath "config/Tenant001/vars.tfvars" -GeoName "UAE" -RegionName "uaesouth" -RegionSubscriptionId "sub-id"
+
+.EXAMPLE
+    .\Manage-GeoRegionMapping.ps1 -Action "RemoveRegion" -VarsFilePath "config/Tenant001/vars.tfvars" -GeoName "EMEA" -RegionName "northeurope"
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('AddGeo', 'RemoveGeo', 'AddRegion', 'RemoveRegion')]
+    [string]$Action,
+
+    [Parameter(Mandatory = $true)]
+    [string]$VarsFilePath,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('EMEA', 'UAE')]
+    [string]$GeoName,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('northeurope', 'westeurope', 'uaenorth', 'uaesouth')]
+    [string]$RegionName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$GeoPlatformSubscriptionId,
+
+    [Parameter(Mandatory = $false)]
+    [string]$GeoPlatformLocation,
+
+    [Parameter(Mandatory = $false)]
+    [string]$RegionSubscriptionId,
+
+    [Parameter(Mandatory = $false)]
+    [string]$Environment = "dev"
+)
+
+# Define region configurations
+$RegionConfigurations = @{
+    'EMEA' = @{
+        'northeurope' = @{
+            'address_space_allocated' = @('10.0.4.0/22', '172.32.0.0/12')
+            'address_space_network_hub' = '10.0.4.0/22'
+            'address_space_gateway_subnet' = '10.0.4.0/26'
+            'address_space_azfw_subnet' = '10.0.4.64/26'
+            'address_space_azfw_management_subnet' = '10.0.4.128/26'
+            'address_space_dns_inbound_subnet' = '10.0.4.192/26'
+            'address_space_dns_outbound_subnet' = '10.0.5.0/26'
+            'ergw_sku' = 'Standard'
+            'azfw_sku' = 'Basic'
+        }
+        'westeurope' = @{
+            'address_space_allocated' = @('10.0.0.0/22', '172.16.0.0/12')
+            'address_space_network_hub' = '10.0.0.0/22'
+            'address_space_gateway_subnet' = '10.0.0.0/26'
+            'address_space_azfw_subnet' = '10.0.0.64/26'
+            'address_space_azfw_management_subnet' = '10.0.0.128/26'
+            'address_space_dns_inbound_subnet' = '10.0.0.192/26'
+            'address_space_dns_outbound_subnet' = '10.0.1.0/26'
+            'ergw_sku' = 'Standard'
+            'azfw_sku' = 'Basic'
+        }
+    }
+    'UAE' = @{
+        'uaenorth' = @{
+            'address_space_allocated' = @('10.0.1.0/24', '192.168.0.0/16')
+            'address_space_network_hub' = '10.0.1.0/24'
+            'address_space_gateway_subnet' = '10.0.1.0/26'
+            'address_space_azfw_subnet' = '10.0.1.64/26'
+            'address_space_dns_inbound_subnet' = '10.0.1.128/26'
+            'address_space_dns_outbound_subnet' = '10.0.1.192/26'
+            'ergw_sku' = 'ErGw1AZ'
+            'azfw_sku' = 'Standard'
+        }
+        'uaesouth' = @{
+            'address_space_allocated' = @('10.0.2.0/24', '192.169.0.0/16')
+            'address_space_network_hub' = '10.0.2.0/24'
+            'address_space_gateway_subnet' = '10.0.2.0/26'
+            'address_space_azfw_subnet' = '10.0.2.64/26'
+            'address_space_dns_inbound_subnet' = '10.0.2.128/26'
+            'address_space_dns_outbound_subnet' = '10.0.2.192/26'
+            'ergw_sku' = 'ErGw1AZ'
+            'azfw_sku' = 'Standard'
+        }
+    }
+}
+
+# Geo default locations
+$GeoDefaultLocations = @{
+    'EMEA' = 'westeurope'
+    'UAE' = 'uaenorth'
+}
+
+function Write-LogMessage {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[$timestamp] [$Level] $Message"
+}
+
+function Test-Prerequisites {
+    Write-LogMessage "Checking prerequisites..."
+    
+    # Check if vars file exists
+    if (-not (Test-Path $VarsFilePath)) {
+        throw "Vars file not found: $VarsFilePath"
+    }
+
+    # Validate action-specific parameters
+    switch ($Action) {
+        'AddGeo' {
+            if ([string]::IsNullOrEmpty($GeoPlatformSubscriptionId)) {
+                throw "GeoPlatformSubscriptionId is required for AddGeo action"
+            }
+            if ([string]::IsNullOrEmpty($GeoPlatformLocation)) {
+                $script:GeoPlatformLocation = $GeoDefaultLocations[$GeoName]
+                Write-LogMessage "Using default location for $GeoName : $GeoPlatformLocation"
+            }
+        }
+        'AddRegion' {
+            if ([string]::IsNullOrEmpty($RegionName)) {
+                throw "RegionName is required for AddRegion action"
+            }
+            if ([string]::IsNullOrEmpty($RegionSubscriptionId)) {
+                throw "RegionSubscriptionId is required for AddRegion action"
+            }
+        }
+        'RemoveRegion' {
+            if ([string]::IsNullOrEmpty($RegionName)) {
+                throw "RegionName is required for RemoveRegion action"
+            }
+        }
+    }
+
+    # Validate geo-region combinations
+    if ($Action -in @('AddRegion', 'RemoveRegion') -and -not [string]::IsNullOrEmpty($RegionName)) {
+        $validRegionCombinations = @{
+            'EMEA' = @('northeurope', 'westeurope')
+            'UAE' = @('uaenorth', 'uaesouth')
+        }
+        
+        $validRegions = $validRegionCombinations[$GeoName]
+        if ($RegionName -notin $validRegions) {
+            throw "Invalid region '$RegionName' for geo '$GeoName'. EMEA only supports: northeurope, westeurope | UAE only supports: uaenorth, uaesouth"
+        }
+        
+        Write-LogMessage "âœ" Geo-Region combination validated: $GeoName -> $RegionName"
+    }
+
+    Write-LogMessage "Prerequisites check completed successfully"
+}
+
+function Get-VarsFileContent {
+    Write-LogMessage "Reading vars file: $VarsFilePath"
+    return Get-Content $VarsFilePath -Raw
+}
+
+function Find-GeoRegionMappingBounds {
+    param([string]$Content)
+    
+    $startPattern = 'geo_region_mapping\s*=\s*\['
+    $startMatch = [regex]::Match($Content, $startPattern)
+    
+    if (-not $startMatch.Success) {
+        throw "Could not find geo_region_mapping in vars file"
+    }
+
+    $startIndex = $startMatch.Index + $startMatch.Length
+    $bracketCount = 1
+    $currentIndex = $startIndex
+    
+    while ($bracketCount -gt 0 -and $currentIndex -lt $Content.Length) {
+        $char = $Content[$currentIndex]
+        if ($char -eq '[') {
+            $bracketCount++
+        } elseif ($char -eq ']') {
+            $bracketCount--
+        }
+        $currentIndex++
+    }
+    
+    if ($bracketCount -ne 0) {
+        throw "Could not find closing bracket for geo_region_mapping"
+    }
+    
+    return @{
+        StartIndex = $startMatch.Index
+        StartContentIndex = $startIndex
+        EndIndex = $currentIndex - 1
+        EndContentIndex = $currentIndex - 2
+    }
+}
+
+function Parse-GeoRegionMapping {
+    param([string]$Content)
+    
+    $bounds = Find-GeoRegionMappingBounds -Content $Content
+    $mappingContent = $Content.Substring($bounds.StartContentIndex, $bounds.EndContentIndex - $bounds.StartContentIndex + 1)
+    
+    # Simple parsing - look for geo blocks
+    $geos = @{}
+    $geoPattern = '{\s*geo_name\s*=\s*"([^"]+)"'
+    $geoMatches = [regex]::Matches($mappingContent, $geoPattern)
+    
+    foreach ($match in $geoMatches) {
+        $geoName = $match.Groups[1].Value
+        $geos[$geoName] = @{
+            'exists' = $true
+            'regions' = @()
+        }
+    }
+    
+    return @{
+        'bounds' = $bounds
+        'geos' = $geos
+        'content' = $mappingContent
+    }
+}
+
+function Generate-GeoBlock {
+    param(
+        [string]$GeoName,
+        [string]$PlatformSubscriptionId,
+        [string]$PlatformLocation,
+        [array]$Regions = @()
+    )
+
+    $indent = "  "
+    $regionBlocks = ""
+    
+    if ($Regions.Count -gt 0) {
+        $regionBlocks = "`n$($indent)    regions = ["
+        foreach ($region in $Regions) {
+            $regionBlocks += Generate-RegionBlock -GeoName $GeoName -RegionName $region.Name -SubscriptionId $region.SubscriptionId -Environment $Environment
+        }
+        $regionBlocks += "`n$($indent)    ]"
+    } else {
+        $regionBlocks = "`n$($indent)    regions = []"
+    }
+
+    return @"
+$indent{
+$($indent)  geo_name                     = "$GeoName"
+$($indent)  geo_platform_subscription_id = "$PlatformSubscriptionId"
+$($indent)  geo_platform_location        = "$PlatformLocation"$regionBlocks
+$indent}
+"@
+}
+
+function Generate-RegionBlock {
+    param(
+        [string]$GeoName,
+        [string]$RegionName,
+        [string]$SubscriptionId,
+        [string]$Environment
+    )
+
+    $config = $RegionConfigurations[$GeoName][$RegionName]
+    $indent = "      "
+    
+    $addressSpaceLines = ""
+    foreach ($space in $config.address_space_allocated) {
+        if ($addressSpaceLines) { $addressSpaceLines += ",`n$($indent)          " }
+        $addressSpaceLines += "`"$space`""
+    }
+
+    return @"
+
+$($indent){
+$($indent)  azure_region_name = "$RegionName"
+$($indent)  environments = [
+$($indent)    {
+$($indent)      environment_name = "$Environment"
+$($indent)      network = {
+$($indent)        subscription_id = "$SubscriptionId"
+$($indent)        dns_environment = "$Environment"
+$($indent)        address_space_allocated = [
+$($indent)          $addressSpaceLines
+$($indent)        ]
+$($indent)        address_space_network_hub            = "$($config.address_space_network_hub)"
+$($indent)        address_space_gateway_subnet         = "$($config.address_space_gateway_subnet)"
+$($indent)        address_space_azfw_subnet            = "$($config.address_space_azfw_subnet)"
+$($indent)        address_space_azfw_management_subnet = "$($config.address_space_azfw_management_subnet)"
+$($indent)        address_space_dns_inbound_subnet     = "$($config.address_space_dns_inbound_subnet)"
+$($indent)        address_space_dns_outbound_subnet    = "$($config.address_space_dns_outbound_subnet)"
+$($indent)        ergw_sku                             = "$($config.ergw_sku)"
+$($indent)        azfw_sku                             = "$($config.azfw_sku)"
+$($indent)      }
+$($indent)    }
+$($indent)  ]
+$($indent)}
+"@
+}
+
+function Add-Geo {
+    param([string]$Content)
+    
+    Write-LogMessage "Adding geo: $GeoName"
+    
+    $mapping = Parse-GeoRegionMapping -Content $Content
+    
+    if ($mapping.geos.ContainsKey($GeoName)) {
+        Write-LogMessage "Geo $GeoName already exists. Skipping." -Level "WARNING"
+        return $Content
+    }
+    
+    $newGeoBlock = Generate-GeoBlock -GeoName $GeoName -PlatformSubscriptionId $GeoPlatformSubscriptionId -PlatformLocation $GeoPlatformLocation
+    
+    # Add to the end of the array
+    $beforeMapping = $Content.Substring(0, $mapping.bounds.EndContentIndex + 1)
+    $afterMapping = $Content.Substring($mapping.bounds.EndContentIndex + 1)
+    
+    # Check if we need a comma
+    $needsComma = $mapping.content.Trim() -ne ""
+    if ($needsComma) {
+        $comma = ","
+    } else {
+        $comma = ""
+    }
+    
+    $newContent = $beforeMapping + $comma + "`n" + $newGeoBlock + $afterMapping
+    
+    Write-LogMessage "Successfully added geo: $GeoName"
+    return $newContent
+}
+
+function Remove-Geo {
+    param([string]$Content)
+    
+    Write-LogMessage "Removing geo: $GeoName"
+    
+    $mapping = Parse-GeoRegionMapping -Content $Content
+    
+    if (-not $mapping.geos.ContainsKey($GeoName)) {
+        Write-LogMessage "Geo $GeoName does not exist. Skipping." -Level "WARNING"
+        return $Content
+    }
+    
+    # Find and remove the geo block
+    $geoPattern = "(?s)\s*,?\s*\{\s*geo_name\s*=\s*`"$GeoName`".*?\n\s*\}\s*,?"
+    $newContent = [regex]::Replace($Content, $geoPattern, "", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    
+    # Clean up any double commas
+    $newContent = [regex]::Replace($newContent, ",(\s*,)+", ",", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    $newContent = [regex]::Replace($newContent, "\[\s*,", "[", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    $newContent = [regex]::Replace($newContent, ",\s*\]", "]", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    
+    Write-LogMessage "Successfully removed geo: $GeoName"
+    return $newContent
+}
+
+function Add-Region {
+    param([string]$Content)
+    
+    Write-LogMessage "Adding region: $RegionName to geo: $GeoName"
+    
+    $mapping = Parse-GeoRegionMapping -Content $Content
+    
+    if (-not $mapping.geos.ContainsKey($GeoName)) {
+        throw "Geo $GeoName does not exist. Cannot add region."
+    }
+    
+    # Check if region already exists
+    $regionExistsPattern = "geo_name\s*=\s*`"$GeoName`".*?azure_region_name\s*=\s*`"$RegionName`""
+    if ([regex]::IsMatch($Content, $regionExistsPattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        Write-LogMessage "Region $RegionName already exists in geo $GeoName. Skipping." -Level "WARNING"
+        return $Content
+    }
+    
+    $newRegionBlock = Generate-RegionBlock -GeoName $GeoName -RegionName $RegionName -SubscriptionId $RegionSubscriptionId -Environment $Environment
+    
+    # Find the geo block and add region to its regions array
+    $geoBlockPattern = "(?s)(\{\s*geo_name\s*=\s*`"$GeoName`".*?regions\s*=\s*\[)(.*?)(\n\s*\]\s*\})"
+    $match = [regex]::Match($Content, $geoBlockPattern)
+    
+    if ($match.Success) {
+        $before = $match.Groups[1].Value
+        $regionsContent = $match.Groups[2].Value
+        $after = $match.Groups[3].Value
+        
+        $needsComma = $regionsContent.Trim() -ne ""
+        if ($needsComma) {
+            $comma = ","
+        } else {
+            $comma = ""
+        }
+        
+        $replacement = $before + $regionsContent + $comma + $newRegionBlock + $after
+        $newContent = $Content.Replace($match.Value, $replacement)
+        
+        Write-LogMessage "Successfully added region: $RegionName to geo: $GeoName"
+        return $newContent
+    }
+    
+    throw "Could not find geo block for $GeoName to add region"
+}
+
+function Remove-Region {
+    param([string]$Content)
+    
+    Write-LogMessage "Removing region: $RegionName from geo: $GeoName"
+    
+    $mapping = Parse-GeoRegionMapping -Content $Content
+    
+    if (-not $mapping.geos.ContainsKey($GeoName)) {
+        Write-LogMessage "Geo $GeoName does not exist. Skipping." -Level "WARNING"
+        return $Content
+    }
+    
+    # Remove the region block
+    $regionPattern = "(?s),?\s*\{\s*azure_region_name\s*=\s*`"$RegionName`".*?\n\s*\}\s*,?"
+    $geoBlockPattern = "(?s)(\{\s*geo_name\s*=\s*`"$GeoName`".*?regions\s*=\s*\[)(.*?)(\n\s*\]\s*\})"
+    
+    $match = [regex]::Match($Content, $geoBlockPattern)
+    if ($match.Success) {
+        $before = $match.Groups[1].Value
+        $regionsContent = $match.Groups[2].Value
+        $after = $match.Groups[3].Value
+        
+        $newRegionsContent = [regex]::Replace($regionsContent, $regionPattern, "", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        
+        # Clean up commas
+        $newRegionsContent = [regex]::Replace($newRegionsContent, ",(\s*,)+", ",", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        $newRegionsContent = [regex]::Replace($newRegionsContent, "^\s*,", "", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        $newRegionsContent = [regex]::Replace($newRegionsContent, ",\s*$", "", [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        
+        $replacement = $before + $newRegionsContent + $after
+        $newContent = $Content.Replace($match.Value, $replacement)
+        
+        Write-LogMessage "Successfully removed region: $RegionName from geo: $GeoName"
+        return $newContent
+    }
+    
+    throw "Could not find geo block for $GeoName to remove region"
+}
+
+function Save-VarsFile {
+    param([string]$Content)
+    
+    Write-LogMessage "Saving updated vars file: $VarsFilePath"
+    
+    # Create backup
+    $backupPath = $VarsFilePath + ".backup.$(Get-Date -Format 'yyyyMMddHHmmss')"
+    Copy-Item $VarsFilePath $backupPath
+    Write-LogMessage "Backup created: $backupPath"
+    
+    # Save new content
+    $Content | Out-File -FilePath $VarsFilePath -Encoding UTF8 -NoNewline
+    Write-LogMessage "Vars file updated successfully"
+}
+
+# Main execution
+try {
+    Write-LogMessage "Starting geo region mapping management"
+    Write-LogMessage "Action: $Action, Geo: $GeoName, Region: $RegionName"
+    
+    Test-Prerequisites
+    $content = Get-VarsFileContent
+    
+    $newContent = switch ($Action) {
+        'AddGeo' { Add-Geo -Content $content }
+        'RemoveGeo' { Remove-Geo -Content $content }
+        'AddRegion' { Add-Region -Content $content }
+        'RemoveRegion' { Remove-Region -Content $content }
+    }
+    
+    if ($newContent -ne $content) {
+        Save-VarsFile -Content $newContent
+        Write-LogMessage "Operation completed successfully"
+    } else {
+        Write-LogMessage "No changes made to vars file"
+    }
+} catch {
+    Write-LogMessage "Error: $($_.Exception.Message)" -Level "ERROR"
+    Write-LogMessage "Stack Trace: $($_.Exception.StackTrace)" -Level "ERROR"
+    exit 1
+}
