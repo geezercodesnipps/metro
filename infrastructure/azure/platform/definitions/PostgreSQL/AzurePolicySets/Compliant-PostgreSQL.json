@@ -1,0 +1,155 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Compliant-PostgreSQL",
+  "properties": {
+    "metadata": {
+      "version": "1.0.0",
+      "category": "PostgreSQL"
+    },
+    "policyType": "Custom",
+    "displayName": "Enforce secure-by-default PostgreSQL for regulated industries",
+    "description": "This policy initiative is a group of policies that ensures PostgreSQL is compliant per regulated Landing Zones",
+    "policyDefinitionGroups": [
+      {
+        "name": "Encryption",
+        "category": "Data Protection",
+        "displayName": "Ensure PostgreSQL is using secure encryption",
+        "description": "Policy to ensure PostgreSQL is using secure encryption"
+      },
+      {
+        "name": "Network",
+        "category": "Network Security",
+        "displayName": "Ensure PostgreSQL is not accessible over the public internet",
+        "description": "Policy to ensure PostgreSQL is not accessible over the public internet"
+      },
+      {
+        "name": "Identity",
+        "category": "Identity Management",
+        "displayName": "Ensure usage of centralized identity and auhtorization system for PostgreSQL",
+        "description": "Policy to ensure PostgreSQL is not using local authorization"
+      },
+      {
+        "name": "Logging",
+        "category": "Logging and Threat Detection",
+        "displayName": "Ensure PostgreSQL is logging all events to Log Analytics",
+        "description": "Policy to ensure PostgreSQL is logging all events to Log Analytics workspace"
+      }
+    ],
+    "parameters": {
+      "postgreSqlFlexiblePublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "postgreSqlPublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "postgreSqlSsl": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "postgreSqlAdvThreatProtection": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "postgreDiagnostics": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "postgreLogAnalyticsWorkspaceId": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "postgreSqlMinimalTlsVersion": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "postgreSqlMinimalTlsVersionSetting": {
+        "type": "string",
+        "defaultValue": "TLS1_2"
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/db048e65-913c-49f9-bb5f-1084184671d3",
+        "policyDefinitionReferenceId": "Dine-PostgreSql-Adv-Threat-Protection",
+        "groupNames": [
+          "Logging",
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('postgreSqlAdvThreatProtection')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-PostgreSql-SSL",
+        "policyDefinitionReferenceId": "Deny-PostgreSql-SSL",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('postgreSqlSsl')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-PostgreSql-MinimalTlsVersion",
+        "policyDefinitionReferenceId": "Deny-PostgreSql-MinimalTlsVersion",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('postgreSqlMinimalTlsVersion')]"
+          },
+          "minimalTlsVersion": {
+            "value": "[parameters('postgreSqlMinimalTlsVersionSetting')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Dine-Diagnostics-PostgreSQL",
+        "policyDefinitionReferenceId": "Dine-Diagnostics-PostgreSQL",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('postgreDiagnostics')]"
+          },
+          "logAnalytics": {
+            "value": "[parameters('postgreLogAnalyticsWorkspaceId')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/b52376f7-9612-48a1-81cd-1ffe4b61032c",
+        "policyDefinitionReferenceId": "Deny-PostgreSql-Public-Network-Access",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('postgreSqlPublicNetworkAccess')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/5e1de0e3-42cb-4ebc-a86d-61d0c619ca48",
+        "policyDefinitionReferenceId": "Deny-PostgreSql-Flexible-Public-Network-Access",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('postgreSqlFlexiblePublicNetworkAccess')]"
+          }
+        }
+      }
+    ]
+  }
+}

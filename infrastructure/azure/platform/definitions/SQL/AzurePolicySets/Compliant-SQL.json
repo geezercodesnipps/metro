@@ -1,0 +1,369 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Compliant-Sql",
+  "properties": {
+    "metadata": {
+      "version": "1.0.0",
+      "category": "SQL"
+    },
+    "policyType": "Custom",
+    "displayName": "Enforce secure-by-default SQL and SQL Managed Instance for regulated industries",
+    "description": "This policy initiative is a group of policies that ensures SQL and SQL Managed Instance is compliant per regulated Landing Zones",
+    "policyDefinitionGroups": [
+      {
+        "name": "Encryption",
+        "category": "Data Protection",
+        "displayName": "Ensure compliance for purge protection, soft delete, and key rotation",
+        "description": "Policy to ensure data protection for SQL and SQL Managed Instance"
+      },
+      {
+        "name": "Network",
+        "category": "Network Security",
+        "displayName": "Ensure SQL and SQL Managed Instance is not accessible over the public internet",
+        "description": "Policy to ensure SQL and SQL Managed Instance is not accessible over the public internet"
+      },
+      {
+        "name": "Identity",
+        "category": "Identity Management",
+        "displayName": "Ensure usage of centralized identity and auhtorization system for SQL",
+        "description": "Policy to ensure SQL is not using local authorization"
+      },
+      {
+        "name": "Logging",
+        "category": "Logging and Threat Detection",
+        "displayName": "Ensure SQL and SQL Managed Instance is logging all events to Log Analytics",
+        "description": "Policy to ensure SQL and SQL Managed Instance is logging all events to Log Analytics workspace"
+      }
+    ],
+    "parameters": {
+      "sqlServerCmk": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlDbPublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlServerDiagnostics": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "sqlServerLogAnalyticsWorkspaceId": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "modifySqlPublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Modify"
+      },
+      "sqlDbTls": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlManagedAadOnly": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlTde": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "sqlManagedPublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlMiMinimalTlsVersionEffect": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlMiMinimalTlsVersion": {
+        "type": "string",
+        "defaultValue": "1.2"
+      },
+      "sqlAadOnly": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlManagedCmk": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlManagedDefender": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "sqlDbServerDiagnostics": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "sqlDbServerLogAnalyticsWorkspaceId": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "sqlDbAllDiagnostics": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "sqlDbAllLogAnalyticsWorkspaceId": {
+        "type": "string",
+        "defaultValue": ""
+      },
+      "sqlMinimalTlsVersionEffect": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "sqlMinimalTlsVersion": {
+        "type": "string",
+        "defaultValue": "1.2"
+      },
+      "sqlAuditingSettings": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "sqlSecurityAlertPolicies": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/b79fa14e-238a-4c2d-b376-442ce508fc84",
+        "policyDefinitionReferenceId": "Dine-Diagnostics-SqlDbServerAll",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlDbAllDiagnostics')]"
+          },
+          "logAnalytics": {
+            "value": "[parameters('sqlDbAllLogAnalyticsWorkspaceId')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/7ea8a143-05e3-4553-abfe-f56bef8b0b70",
+        "policyDefinitionReferenceId": "Dine-Diagnostics-SqlDbServer",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlDbServerDiagnostics')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[parameters('sqlDbServerLogAnalyticsWorkspaceId')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/c5a62eb0-c65a-4220-8a4d-f70dd4ca95dd",
+        "policyDefinitionReferenceId": "Dine-Sql-Managed-Defender",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlManagedDefender')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/ac01ad65-10e5-46df-bdd9-6b0cad13e1d2",
+        "policyDefinitionReferenceId": "Deny-Sql-Managed-Cmk",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlManagedCmk')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/abda6d70-9778-44e7-84a8-06713e6db027",
+        "policyDefinitionReferenceId": "Deny-Sql-Aad-Only",
+        "groupNames": [
+          "Identity"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlAadOnly')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-SqlMi-MinimalTlsVersion",
+        "policyDefinitionReferenceId": "Deny-SqlMi-MinimalTlsVersion",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlMiMinimalTlsVersionEffect')]"
+          },
+          "minimalTlsVersion": {
+            "value": "[parameters('sqlMiMinimalTlsVersion')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-Sql-MinimalTlsVersion",
+        "policyDefinitionReferenceId": "Deny-Sql-MinimalTlsVersion",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlMinimalTlsVersionEffect')]"
+          },
+          "minimalTlsVersion": {
+            "value": "[parameters('sqlMinimalTlsVersion')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Dine-Sql-AuditingSettings",
+        "policyDefinitionReferenceId": "Dine-Sql-AuditingSettings",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlAuditingSettings')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Dine-Sql-SecurityAlertPolicies",
+        "policyDefinitionReferenceId": "Dine-Sql-SecurityAlertPolicies",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlSecurityAlertPolicies')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/9dfea752-dd46-4766-aed1-c355fa93fb91",
+        "policyDefinitionReferenceId": "Deny-Sql-Managed-Public-Endpoint",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlManagedPublicNetworkAccess')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/86a912f6-9a06-4e26-b447-11b16ba8659f",
+        "policyDefinitionReferenceId": "Dine-Sql-Tde",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlTde')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/78215662-041e-49ed-a9dd-5385911b3a1f",
+        "policyDefinitionReferenceId": "Deny-Sql-Managed-Aad-Only",
+        "groupNames": [
+          "Identity"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlManagedAadOnly')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/36d49e87-48c4-4f2e-beed-ba4ed02b71f5",
+        "policyDefinitionReferenceId": "Dine-Sql-Defender",
+        "groupNames": [
+          "Encryption",
+          "Logging"
+        ],
+        "parameters": {}
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/6134c3db-786f-471e-87bc-8f479dc890f6",
+        "policyDefinitionReferenceId": "Dine-Sql-Adv-Data",
+        "groupNames": [
+          "Encryption",
+          "Logging"
+        ],
+        "parameters": {}
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/32e6bbec-16b6-44c2-be37-c5b672d103cf",
+        "policyDefinitionReferenceId": "Deny-Sql-Db-Tls",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlDbTls')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/0a370ff3-6cab-4e85-8995-295fd854c5b8",
+        "policyDefinitionReferenceId": "Deny-SQL-CMK",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlServerCmk')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/1b8ca024-1d5c-4dec-8995-b1a932b41780",
+        "policyDefinitionReferenceId": "Deny-SQL-Db-PublicNetworkAccess",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlDbPublicNetworkAccess')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/25da7dfb-0666-4a15-a8f5-402127efd8bb",
+        "policyDefinitionReferenceId": "Dine-Sql-Diagnostics",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('sqlServerDiagnostics')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[parameters('sqlServerLogAnalyticsWorkspaceId')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/28b0b1e5-17ba-4963-a7a4-5a1ab4400a0b",
+        "policyDefinitionReferenceId": "Modify-Sql-PublicNetworkAccess",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('modifySqlPublicNetworkAccess')]"
+          }
+        }
+      }
+    ]
+  }
+}

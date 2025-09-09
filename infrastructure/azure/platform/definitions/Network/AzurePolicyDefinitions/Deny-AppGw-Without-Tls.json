@@ -1,0 +1,71 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-AppGw-Without-Tls",
+  "properties": {
+    "displayName": "Application Gateway should be deployed with predefined Microsoft policy that is using TLS version 1.2",
+    "description": "This policy enables you to restrict that Application Gateways is always deployed with predefined Microsoft policy that is using TLS version 1.2",
+    "mode": "All",
+    "policyType": "Custom",
+    "metadata": {
+      "category": "Network",
+      "version": "1.0.0"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "predefinedPolicyName": {
+        "type": "array",
+        "metadata": {
+          "displayName": "Predefined policy name",
+          "description": "Predefined policy name"
+        },
+        "defaultValue": [
+          "AppGwSslPolicy20220101",
+          "AppGwSslPolicy20170401S",
+          "AppGwSslPolicy20220101S"
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Network/applicationGateways"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Network/applicationGateways/sslPolicy.policyType",
+                "notEquals": "Predefined"
+              },
+              {
+                "field": "Microsoft.Network/applicationGateways/sslPolicy.policyType",
+                "exists": "false"
+              },
+              {
+                "field": "Microsoft.Network/applicationGateways/sslPolicy.policyName",
+                "notIn": "[parameters('predefinedPolicyName')]"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

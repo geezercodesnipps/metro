@@ -1,0 +1,59 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "DenyAction-VnetPeerings-AVNM",
+  "properties": {
+    "displayName": "Vnet Peerings created and managed by Azure Virtual Network Manager should not be removed",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Vnet Peerings created and managed by Azure Virtual Network Manager should not be removed to ensure compliance.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Network"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "denyAction",
+          "Disabled"
+        ],
+        "defaultValue": "denyAction"
+      },
+      "vnetPeeringPrefix": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Vnet Peering Prefix",
+          "description": "The prefix of the vnet peering configuration"
+        },
+        "defaultValue": "AVNM_"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Network/virtualNetworks/virtualNetworkPeerings"
+          },
+          {
+            "field": "name",
+            "like": "[concat(parameters('vnetPeeringPrefix'), '*')]"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]",
+        "details": {
+          "actionNames": [
+            "delete"
+          ]
+        }
+      }
+    }
+  }
+}

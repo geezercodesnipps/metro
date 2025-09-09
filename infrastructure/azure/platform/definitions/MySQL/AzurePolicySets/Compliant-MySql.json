@@ -1,0 +1,147 @@
+{
+  "type": "Microsoft.Authorization/policySetDefinitions",
+  "apiVersion": "2021-06-01",
+  "name": "Compliant-MySQL",
+  "properties": {
+    "metadata": {
+      "version": "1.0.0",
+      "category": "MySql"
+    },
+    "policyType": "Custom",
+    "displayName": "Enforce secure-by-default MySQL for regulated industries",
+    "description": "This policy initiative is a group of policies that ensures MySQL is compliant per regulated Landing Zones",
+    "policyDefinitionGroups": [
+      {
+        "name": "Encryption",
+        "category": "Data Protection",
+        "displayName": "Ensure MySQL is using secure encryption",
+        "description": "Policy to ensure MySQL is using secure encryption"
+      },
+      {
+        "name": "Network",
+        "category": "Network Security",
+        "displayName": "Ensure MySQL is not accessible over the public internet",
+        "description": "Policy to ensure MySQL is not accessible over the public internet"
+      },
+      {
+        "name": "Identity",
+        "category": "Identity Management",
+        "displayName": "Ensure usage of centralized identity and auhtorization system for MySQL",
+        "description": "Policy to ensure MySQL is not using local authorization"
+      },
+      {
+        "name": "Logging",
+        "category": "Logging and Threat Detection",
+        "displayName": "Ensure MySQL is logging all events to Log Analytics",
+        "description": "Policy to ensure MySQL is logging all events to Log Analytics workspace"
+      }
+    ],
+    "parameters": {
+      "mySqlInfraEncryption": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "mySqlAdvThreatProtection": {
+        "type": "string",
+        "defaultValue": "DeployIfNotExists"
+      },
+      "mySqlFlexiblePublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "mySqlPublicNetworkAccess": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "mySqlSsl": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "mySQLMinimalTlsVersion": {
+        "type": "string",
+        "defaultValue": "Deny"
+      },
+      "mySQLMinimalTlsVersionSetting": {
+        "type": "string",
+        "defaultValue": "TLS1_2"
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-MySQL-SSL-Connection",
+        "policyDefinitionReferenceId": "Deny-MySql-Ssl",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('mySqlSsl')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "${scope_id_root}/providers/Microsoft.Authorization/policyDefinitions/Deny-MySQL-MinimalTlsVersion",
+        "policyDefinitionReferenceId": "Deny-MySQL-MinimalTlsVersion",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('mySQLMinimalTlsVersion')]"
+          },
+          "minimalTlsVersion": {
+            "value": "[parameters('mySQLMinimalTlsVersionSetting')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/d9844e8a-1437-4aeb-a32c-0c992f056095",
+        "policyDefinitionReferenceId": "Deny-MySql-Public-Network-Access",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('mySqlPublicNetworkAccess')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/c9299215-ae47-4f50-9c54-8a392f68a052",
+        "policyDefinitionReferenceId": "Deny-MySql-Flex-Public-Network-Access",
+        "groupNames": [
+          "Network"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('mySqlFlexiblePublicNetworkAccess')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/80ed5239-4122-41ed-b54a-6f1fa7552816",
+        "policyDefinitionReferenceId": "Dine-MySql-Adv-Threat-Protection",
+        "groupNames": [
+          "Logging"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('mySqlAdvThreatProtection')]"
+          }
+        }
+      },
+      {
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/3a58212a-c829-4f13-9872-6371df2fd0b4",
+        "policyDefinitionReferenceId": "Deny-MySql-Infra-Encryption",
+        "groupNames": [
+          "Encryption"
+        ],
+        "parameters": {
+          "effect": {
+            "value": "[parameters('mySqlInfraEncryption')]"
+          }
+        }
+      }
+    ]
+  }
+}

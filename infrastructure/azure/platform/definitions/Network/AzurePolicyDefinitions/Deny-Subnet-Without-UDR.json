@@ -1,0 +1,94 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-Subnet-Without-UDR",
+  "properties": {
+    "description": "This policy prevents creation of subnets without a UDR attached to them.",
+    "displayName": "Prevent creation of subnets without Route Table",
+    "mode": "All",
+    "policyType": "Custom",
+    "metadata": {
+      "category": "Network",
+      "version": "1.0.0"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      },
+      "excludedSubnets": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Excluded Subnets",
+          "description": "Array of subnet names that are excluded from this policy"
+        },
+        "defaultValue": [
+          "GatewaySubnet",
+          "AzureFirewallSubnet",
+          "AzureFirewallManagementSubnet",
+          "AzureBastionSubnet"
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "anyOf": [
+          {
+            "allOf": [
+              {
+                "equals": "Microsoft.Network/virtualNetworks",
+                "field": "type"
+              },
+              {
+                "count": {
+                  "field": "Microsoft.Network/virtualNetworks/subnets[*]",
+                  "where": {
+                    "allOf": [
+                      {
+                        "exists": "false",
+                        "field": "Microsoft.Network/virtualNetworks/subnets[*].routeTable.id"
+                      },
+                      {
+                        "field": "Microsoft.Network/virtualNetworks/subnets[*].name",
+                        "notIn": "[parameters('excludedSubnets')]"
+                      }
+                    ]
+                  }
+                },
+                "notEquals": 0
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "field": "type",
+                "equals": "Microsoft.Network/virtualNetworks/subnets"
+              },
+              {
+                "field": "name",
+                "notIn": "[parameters('excludedSubnets')]"
+              },
+              {
+                "field": "Microsoft.Network/virtualNetworks/subnets/routeTable.id",
+                "exists": "false"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

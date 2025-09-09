@@ -1,0 +1,47 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-Firewall-WithoutPolicy",
+  "properties": {
+    "displayName": "Azure Firewall should have a default Firewall Policy",
+    "description": "This policy denies the creation of Azure Firewall without a default Firewall Policy.",
+    "policyType": "Custom",
+    "mode": "All",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Network"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        }
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Network/azureFirewalls"
+          },
+          {
+            "field": "Microsoft.Network/azureFirewalls/firewallPolicy.id",
+            "exists": "false"
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

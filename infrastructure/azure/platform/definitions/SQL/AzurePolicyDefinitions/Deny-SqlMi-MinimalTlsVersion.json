@@ -1,0 +1,68 @@
+{
+  "type": "Microsoft.Authorization/policyDefinitions",
+  "apiVersion": "2023-04-01",
+  "name": "Deny-SqlMi-MinimalTlsVersion",
+  "properties": {
+    "displayName": "SQL Managed Instance should have the minimal TLS version of 1.2",
+    "description": "Setting minimal TLS version to 1.2 improves security by ensuring your SQL Managed Instance can only be accessed from clients using TLS 1.2. Using versions of TLS less than 1.2 is not recommended since they have well documented security vulnerabilities.",
+    "mode": "Indexed",
+    "policyType": "Custom",
+    "metadata": {
+      "version": "1.0.1",
+      "category": "SQL"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Enable or disable the execution of the policy"
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Audit"
+      },
+      "minimalTlsVersion": {
+        "type": "String",
+        "defaultValue": "1.2",
+        "allowedValues": [
+          "1.2",
+          "1.1",
+          "1.0"
+        ],
+        "metadata": {
+          "displayName": "Select version for SQL server",
+          "description": "Select version minimum TLS version SQL servers to enforce"
+        }
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Sql/managedInstances"
+          },
+          {
+            "anyOf": [
+              {
+                "field": "Microsoft.Sql/managedInstances/minimalTlsVersion",
+                "exists": false
+              },
+              {
+                "field": "Microsoft.Sql/managedInstances/minimalTlsVersion",
+                "notEquals": "[parameters('minimalTlsVersion')]"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}
