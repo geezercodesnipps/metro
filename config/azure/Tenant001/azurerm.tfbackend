@@ -1,0 +1,6 @@
+subscription_id      = "089d1e87-7b1f-4300-b121-53fb53bb4ad3"
+resource_group_name  = "terraform-state-rg"
+storage_account_name = "tfstatefilesstg001"
+container_name       = "tfstates"
+key                  = "terraform.metropolis001.tfstate"
+use_azuread_auth     = true

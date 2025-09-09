@@ -1,0 +1,18 @@
+# S3 Backend Configuration for AWS Platform - Tenant001
+# ADIA Metropolis Multi-Cloud Platform
+
+bucket         = "adia-metropolis-terraform-state-aws-tenant001"
+key            = "aws/platform/terraform.tfstate"
+region         = "us-east-1"
+encrypt        = true
+dynamodb_table = "adia-metropolis-terraform-locks-tenant001"
+
+# Additional S3 backend security
+versioning    = true
+server_side_encryption_configuration {
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# Local Backend Configuration for Azure Platform - Tenant001
+# ADIA Metropolis Multi-Cloud Platform
+
+path = "C:/agent/terraform-state/platform/tenant001-azure-terraform.tfstate"
