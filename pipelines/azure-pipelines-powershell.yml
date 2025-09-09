@@ -1,0 +1,472 @@
+# Azure DevOps Pipeline for Terraform - Windows PowerShell Compatible
+# Self-hosted agent pool deployment with full PowerShell support
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infrastructure/*
+      - config/*
+      - azure-pipelines.yml
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infrastructure/*
+      - config/*
+
+parameters:
+  - name: environment
+    displayName: 'Environment to deploy'
+    type: string
+    default: 'dev'
+    values:
+      - dev
+      - staging
+      - prod  
+  - name: tenant
+    displayName: 'Tenant configuration'
+    type: string
+    default: 'Tenant001'
+    values:
+      - Tenant001
+      - Tenant002
+  - name: deploymentType
+    displayName: 'Deployment type'
+    type: string
+    default: 'platform'
+    values:
+      - platform
+      - landing-zone
+  - name: action
+    displayName: 'Action to perform'
+    type: string
+    default: 'plan'
+    values:
+      - plan
+      - apply
+      - destroy
+  - name: agentPool
+    displayName: 'Agent pool to use'
+    type: string
+    default: 'selfhosted'
+    values:
+      - selfhosted
+
+variables:
+  - name: terraformVersion
+    value: '1.7.5'
+  - name: azureServiceConnection
+    value: 'Adia_Deploy'  # Using existing service connection
+  - name: backendConfig
+    value: 'config/${{ parameters.tenant }}/azurerm.tfbackend'
+  - name: tfvarsFile
+    value: 'config/${{ parameters.tenant }}/vars.tfvars'
+
+# Self-hosted agent pool configuration
+pool:
+  name: 'selfhosted'
+
+stages:
+  - stage: TerraformValidate
+    displayName: 'Terraform Validation'
+    condition: always()
+    jobs:
+      - job: Validate
+        displayName: 'Validate Terraform'        
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Set Working Directory'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if ("${{ parameters.deploymentType }}" -eq "platform") {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/platform"
+                  Write-Host "Working directory set to: infrastructure/platform"
+                } else {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/file_new_lz"
+                  Write-Host "Working directory set to: infrastructure/file_new_lz"
+                }
+
+          - task: PowerShell@2
+            displayName: 'Check Prerequisites'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "🔍 Checking prerequisites on self-hosted agent..."
+                
+                # Check if running on self-hosted agent
+                if ($env:AGENT_NAME) {
+                  Write-Host "✅ Running on self-hosted agent: $($env:AGENT_NAME)"
+                } else {
+                  Write-Host "ℹ️ Agent information not available"
+                }
+                
+                # Check Terraform installation
+                try {
+                  $terraformVersion = terraform version | Select-Object -First 1
+                  Write-Host "✅ Terraform found: $terraformVersion"
+                } catch {
+                  Write-Host "❌ Terraform not found on agent"
+                  Write-Host "Please install Terraform manually on Windows self-hosted agent"
+                  Write-Host "Download from: https://releases.hashicorp.com/terraform/$(terraformVersion)/"
+                  exit 1
+                }
+                  # Check Azure CLI
+                try {
+                  $null = az --version 2>$null
+                  if ($LASTEXITCODE -eq 0) {
+                    $azVersionOutput = az --version | Select-Object -First 1
+                    Write-Host "✅ Azure CLI found: $azVersionOutput"
+                  } else {
+                    throw "Azure CLI command failed"
+                  }
+                } catch {
+                  Write-Host "❌ Azure CLI not found on agent"
+                  Write-Host "Please install Azure CLI on the self-hosted agent"
+                  Write-Host "Download from: https://aka.ms/installazurecliwindows"
+                  exit 1
+                }
+
+          - task: AzureCLI@2
+            displayName: 'Azure CLI Login'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                Write-Host "🔐 Authenticated with Azure CLI"
+                $subscription = az account show --query name -o tsv
+                $tenant = az account show --query tenantId -o tsv
+                Write-Host "Subscription: $subscription"
+                Write-Host "Tenant: $tenant"
+
+          - task: PowerShell@2
+            displayName: 'Terraform Format Check'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "🔍 Checking Terraform formatting..."
+                $formatCheck = terraform fmt -check -recursive
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✅ Terraform format check passed"
+                } else {
+                  Write-Host "⚠️ Terraform format issues found. Running format fix..."
+                  terraform fmt -recursive
+                  Write-Host "✅ Terraform formatting fixed"
+                }
+            continueOnError: true
+
+          - task: PowerShell@2
+            displayName: 'Terraform Init'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Set-Location "$(workingDirectory)"
+                Write-Host "🔧 Initializing Terraform in $(workingDirectory)..."
+                Write-Host "Backend Config: $(backendConfig)"
+                terraform init -backend-config="../../$(backendConfig)"
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✅ Terraform initialized successfully"
+                } else {
+                  Write-Host "❌ Terraform initialization failed"
+                  exit $LASTEXITCODE
+                }
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+          - task: PowerShell@2
+            displayName: 'Terraform Validate'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Set-Location "$(workingDirectory)"
+                Write-Host "🔍 Validating Terraform configuration..."
+                terraform validate -no-color
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✅ Terraform validation passed"
+                } else {
+                  Write-Host "❌ Terraform validation failed"
+                  exit $LASTEXITCODE
+                }
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+  - stage: TerraformPlan
+    displayName: 'Terraform Plan'
+    dependsOn: TerraformValidate
+    condition: succeeded()
+    jobs:      
+      - job: Plan
+        displayName: 'Generate Terraform Plan'
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Set Working Directory'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if ("${{ parameters.deploymentType }}" -eq "platform") {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/platform"
+                  Write-Host "Working directory set to: infrastructure/platform"
+                } else {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/file_new_lz"
+                  Write-Host "Working directory set to: infrastructure/file_new_lz"
+                }
+
+          - task: AzureCLI@2
+            displayName: 'Azure CLI Login'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                Write-Host "🔐 Authenticated with Azure CLI"
+
+          - task: PowerShell@2
+            displayName: 'Terraform Init'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Set-Location "$(workingDirectory)"
+                terraform init -backend-config="../../$(backendConfig)"
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+          - task: PowerShell@2
+            displayName: 'Terraform Plan'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Set-Location "$(workingDirectory)"
+                Write-Host "📋 Generating Terraform plan..."
+                Write-Host "Variables file: $(tfvarsFile)"
+                
+                # Run terraform plan and capture exit code
+                $ErrorActionPreference = 'Continue'
+                terraform plan -detailed-exitcode -no-color -out=tfplan -var-file="../../$(tfvarsFile)" | Tee-Object -FilePath "plan-output.txt"
+                $planExitCode = $LASTEXITCODE
+                $ErrorActionPreference = 'Stop'
+                
+                # Set variable for downstream usage
+                Write-Host "##vso[task.setvariable variable=planExitCode;isOutput=true]$planExitCode"
+                
+                # Display plan results
+                if ($planExitCode -eq 0) {
+                  Write-Host "✅ No changes detected"
+                } elseif ($planExitCode -eq 2) {
+                  Write-Host "📋 Changes detected and plan generated"
+                } else {
+                  Write-Host "❌ Terraform plan failed"
+                  exit $planExitCode
+                }
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+            name: 'terraformPlan'
+
+          - task: PowerShell@2
+            displayName: 'Show Terraform Plan'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Set-Location "$(workingDirectory)"
+                Write-Host "## 📋 Terraform Plan Output"
+                Write-Host "### Deployment Details:"
+                Write-Host "- **Environment**: ${{ parameters.environment }}"
+                Write-Host "- **Tenant**: ${{ parameters.tenant }}"
+                Write-Host "- **Deployment Type**: ${{ parameters.deploymentType }}"
+                Write-Host "- **Agent Pool**: ${{ parameters.agentPool }}"
+                Write-Host "- **Working Directory**: $(workingDirectory)"
+                Write-Host ""
+                Write-Host "### Plan Results:"
+                if (Test-Path "tfplan") {
+                  $planOutput = terraform show -no-color tfplan
+                  $planOutput | Select-Object -First 50 | ForEach-Object { Write-Host $_ }
+                  Write-Host ""
+                  Write-Host "*Plan truncated for readability. Full plan available in artifacts.*"
+                } else {
+                  Write-Host "No plan file generated"
+                }
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Terraform Plan'
+            inputs:
+              targetPath: '$(workingDirectory)/tfplan'
+              artifact: 'tfplan-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+              publishLocation: 'pipeline'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Plan Output'
+            inputs:
+              targetPath: '$(workingDirectory)/plan-output.txt'
+              artifact: 'plan-output-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+              publishLocation: 'pipeline'
+
+  - stage: TerraformApply
+    displayName: 'Terraform Apply'
+    dependsOn: TerraformPlan
+    condition: |
+      and(
+        succeeded(),
+        or(
+          and(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.Reason'], 'IndividualCI')),
+          eq('${{ parameters.action }}', 'apply')
+        )
+      )
+    jobs:
+      - deployment: Apply
+        displayName: 'Apply Terraform Changes'        
+        environment: '${{ parameters.environment }}'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: 'Checkout Repository'
+
+                - task: PowerShell@2
+                  displayName: 'Set Working Directory'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      if ("${{ parameters.deploymentType }}" -eq "platform") {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/platform"
+                        Write-Host "Working directory set to: infrastructure/platform"
+                      } else {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/file_new_lz"
+                        Write-Host "Working directory set to: infrastructure/file_new_lz"
+                      }
+
+                - task: AzureCLI@2
+                  displayName: 'Azure CLI Login'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'pscore'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      Write-Host "🔐 Authenticated with Azure CLI"
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download Terraform Plan'
+                  inputs:
+                    buildType: 'current'
+                    artifactName: 'tfplan-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+                    targetPath: '$(workingDirectory)'
+
+                - task: PowerShell@2
+                  displayName: 'Terraform Init'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Set-Location "$(workingDirectory)"
+                      terraform init -backend-config="../../$(backendConfig)"
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+                - task: PowerShell@2
+                  displayName: 'Terraform Apply'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Set-Location "$(workingDirectory)"
+                      Write-Host "🚀 Applying Terraform changes..."
+                      terraform apply -auto-approve tfplan
+                      if ($LASTEXITCODE -eq 0) {
+                        Write-Host "✅ Terraform apply completed successfully!"
+                      } else {
+                        Write-Host "❌ Terraform apply failed"
+                        exit $LASTEXITCODE
+                      }
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+                - task: PowerShell@2
+                  displayName: 'Generate Portal Links'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "## 🎉 Deployment Completed Successfully!"
+                      Write-Host ""
+                      Write-Host "### 🌐 Azure Portal Quick Links:"
+                      Write-Host "- [Resource Groups](https://portal.azure.com/#view/HubsExtension/BrowseResourceGroups)"
+                      Write-Host "- [Management Groups](https://portal.azure.com/#view/Microsoft_Azure_ManagementGroups/ManagementGroupBrowseBlade)"
+                      Write-Host "- [Policy Assignments](https://portal.azure.com/#view/Microsoft_Azure_Policy/PolicyMenuBlade/~/Assignments)"
+                      Write-Host "- [Activity Log](https://portal.azure.com/#view/Microsoft_Azure_ActivityLog/ActivityLogBlade)"
+                      Write-Host ""
+                      Write-Host "### 📊 Deployment Summary:"
+                      Write-Host "- **Environment**: ${{ parameters.environment }}"
+                      Write-Host "- **Tenant**: ${{ parameters.tenant }}"
+                      Write-Host "- **Type**: ${{ parameters.deploymentType }}"
+                      Write-Host "- **Agent**: ${{ parameters.agentPool }}"
+                      Write-Host "- **Timestamp**: $(Get-Date)"
+
+  - stage: TerraformDestroy
+    displayName: 'Terraform Destroy'
+    dependsOn: TerraformPlan
+    condition: |
+      and(
+        succeeded(),
+        eq('${{ parameters.action }}', 'destroy')
+      )
+    jobs:
+      - deployment: Destroy
+        displayName: 'Destroy Infrastructure'        
+        environment: '${{ parameters.environment }}-destroy'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: 'Checkout Repository'
+
+                - task: PowerShell@2
+                  displayName: 'Set Working Directory'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      if ("${{ parameters.deploymentType }}" -eq "platform") {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/platform"
+                        Write-Host "Working directory set to: infrastructure/platform"
+                      } else {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/file_new_lz"
+                        Write-Host "Working directory set to: infrastructure/file_new_lz"
+                      }
+
+                - task: AzureCLI@2
+                  displayName: 'Azure CLI Login'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'pscore'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      Write-Host "🔐 Authenticated with Azure CLI"
+
+                - task: PowerShell@2
+                  displayName: 'Terraform Init'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Set-Location "$(workingDirectory)"
+                      terraform init -backend-config="../../$(backendConfig)"
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+                - task: PowerShell@2
+                  displayName: 'Terraform Destroy'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Set-Location "$(workingDirectory)"
+                      Write-Host "⚠️ DESTROYING infrastructure for ${{ parameters.tenant }} - ${{ parameters.deploymentType }}"
+                      terraform destroy -auto-approve -var-file="../../$(tfvarsFile)"
+                      if ($LASTEXITCODE -eq 0) {
+                        Write-Host "💥 Infrastructure destroyed successfully"
+                      } else {
+                        Write-Host "❌ Terraform destroy failed"
+                        exit $LASTEXITCODE
+                      }
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'

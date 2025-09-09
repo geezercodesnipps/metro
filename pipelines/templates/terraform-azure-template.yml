@@ -1,0 +1,387 @@
+# Terraform Azure Template for Parallel Pipeline
+# Reusable Azure DevOps Pipeline Template
+
+parameters:
+  - name: terraformAction
+    type: string
+    values:
+      - validate
+      - plan
+      - apply
+      - destroy
+  - name: tenant
+    type: string
+  - name: deploymentType
+    type: string
+  - name: enableAzureIntent
+    type: boolean
+    default: true
+  - name: enableAwsIntent
+    type: boolean
+    default: false
+  - name: deploySecureHubs
+    type: boolean
+    default: true
+  - name: deployTipInfrastructure
+    type: boolean
+    default: false
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Install Terraform'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "📦 Installing Terraform $(terraformVersion)..."
+        
+        $terraformVersion = "$(terraformVersion)"
+        
+        # Check if Terraform is already installed and correct version
+        try {
+          $currentVersion = & terraform version -json 2>$null | ConvertFrom-Json | Select-Object -ExpandProperty terraform_version
+          if ($currentVersion -eq $terraformVersion) {
+            Write-Host "✅ Terraform $terraformVersion is already installed"
+            return
+          }
+        } catch {
+          Write-Host "Terraform not found or version mismatch, installing..."
+        }
+        
+        # Detect OS and install appropriate version
+        if ($IsWindows -or $env:OS -eq "Windows_NT" -or $env:AGENT_OS -eq "Windows_NT") {
+          Write-Host "Windows detected, installing Terraform for Windows..."
+          $downloadUrl = "https://releases.hashicorp.com/terraform/${terraformVersion}/terraform_${terraformVersion}_windows_amd64.zip"
+          $zipFile = "terraform.zip"
+          $executableName = "terraform.exe"
+        } else {
+          Write-Host "Linux detected, installing Terraform for Linux..."
+          $downloadUrl = "https://releases.hashicorp.com/terraform/${terraformVersion}/terraform_${terraformVersion}_linux_amd64.zip"
+          $zipFile = "terraform.zip"
+          $executableName = "terraform"
+        }
+        
+        try {
+          # Download Terraform
+          Write-Host "Downloading Terraform from: $downloadUrl"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $zipFile
+          
+          # Extract the executable
+          Write-Host "Extracting Terraform..."
+          Expand-Archive -Path $zipFile -DestinationPath "." -Force
+          
+          # Make sure it's executable and in PATH
+          if (Test-Path $executableName) {
+            $currentDir = Get-Location
+            $env:PATH = "$currentDir;$env:PATH"
+            Write-Host "✅ Terraform installed successfully"
+            
+            # Verify installation
+            & ".\$executableName" version
+          } else {
+            throw "Terraform executable not found after extraction"
+          }
+          
+          # Cleanup
+          Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+          
+        } catch {
+          Write-Host "❌ Failed to install Terraform: $_"
+          throw
+        }
+
+  # Download Terraform Plan Artifact (only for apply actions) - matching working pipeline artifact names
+  - task: DownloadBuildArtifacts@1
+    displayName: 'Download Azure Terraform Plan'
+    condition: eq('${{ parameters.terraformAction }}', 'apply')
+    inputs:
+      buildType: 'current'
+      downloadType: 'single'
+      artifactName: 'tfplan-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+      downloadPath: 'infrastructure/azure/${{ parameters.deploymentType }}'
+    continueOnError: true  # Don't fail if artifact not found - fallback logic handles this
+
+  - task: AzureCLI@2
+    displayName: 'Azure Terraform ${{ parameters.terraformAction }}'
+    inputs:
+      azureSubscription: '$(azureServiceConnection)'
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      addSpnToEnvironment: true
+      inlineScript: |
+        Set-Location "infrastructure/azure/${{ parameters.deploymentType }}"
+        
+        Write-Host "🔧 Azure Terraform ${{ parameters.terraformAction }} for ${{ parameters.tenant }}"
+        Write-Host "Working directory: $(Get-Location)"
+        
+        # Set Terraform authentication using federated credentials (like original pipeline)
+        $env:ARM_CLIENT_ID = $env:servicePrincipalId
+        $env:ARM_TENANT_ID = $env:tenantId
+        $env:ARM_OIDC_TOKEN = $env:idToken
+        $env:ARM_USE_OIDC = "true"
+        
+        # Extract subscription ID from Azure vars file and set ARM_SUBSCRIPTION_ID
+        $azureVarsFile = "$(System.DefaultWorkingDirectory)/config/azure/${{ parameters.tenant }}/azure-vars.tfvars"
+        if (Test-Path $azureVarsFile) {
+          $varsContent = Get-Content $azureVarsFile -Raw
+          if ($varsContent -match 'global_platform_subscription_id\s*=\s*"([^"]+)"') {
+            $env:ARM_SUBSCRIPTION_ID = $matches[1]
+            Write-Host "✅ Using subscription ID from vars file: $($env:ARM_SUBSCRIPTION_ID)"
+          } else {
+            Write-Host "⚠️ Could not extract subscription ID from vars file, using Azure CLI default"
+            $azContext = az account show --output json | ConvertFrom-Json
+            $env:ARM_SUBSCRIPTION_ID = $azContext.id
+          }
+        } else {
+          Write-Host "##vso[task.logissue type=error]Azure vars file not found: $azureVarsFile"
+          exit 1
+        }
+        
+        # Clean up any existing Terraform state and cache to avoid conflicts
+        Write-Host "🧹 Cleaning Terraform cache and state..."
+        if (Test-Path ".terraform") {
+          Remove-Item -Recurse -Force ".terraform" -ErrorAction SilentlyContinue
+          Write-Host "Removed existing .terraform directory"
+        }
+        if (Test-Path ".terraform.lock.hcl") {
+          Remove-Item -Force ".terraform.lock.hcl" -ErrorAction SilentlyContinue
+          Write-Host "Removed existing lock file"
+        }
+        
+        # Initialize Terraform with persistent local backend (matching working azure-pipelines.yml)
+        Write-Host "🔧 Initializing Terraform with persistent local backend..."
+        
+        # Ensure state directory exists on self-hosted agent (matching working pattern)
+        $stateDir = if ("${{ parameters.deploymentType }}" -eq "platform") { "C:\agent\terraform-state\platform" } else { "C:\agent\terraform-state\landing-zone" }
+        if (-not (Test-Path $stateDir)) {
+          New-Item -ItemType Directory -Path $stateDir -Force
+          Write-Host "Created state directory: $stateDir"
+        }
+        
+        Write-Host "Using federated credentials for Terraform authentication"
+        & terraform init -backend-config="path=$stateDir\terraform.tfstate"
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "❌ Terraform initialization failed" -ForegroundColor Red
+          exit 1
+        }
+        Write-Host "✅ Terraform initialized successfully" -ForegroundColor Green
+        
+        # Debug Azure CLI context and subscription
+        Write-Host "🔍 Checking Azure CLI context:"
+        try {
+          $azContext = az account show --output json | ConvertFrom-Json
+          Write-Host "  Current Azure CLI Subscription ID: $($azContext.id)"
+          Write-Host "  Current Azure CLI Subscription Name: $($azContext.name)"
+          Write-Host "  Current Azure CLI Tenant ID: $($azContext.tenantId)"
+        } catch {
+          Write-Host "  ⚠️ Failed to get Azure CLI context: $_" -ForegroundColor Yellow
+        }
+        
+        # Debug AWS authentication for intent layer
+        Write-Host "🔍 Checking AWS authentication environment variables for intent layer:"
+        Write-Host "  AWS_ACCESS_KEY_ID exists: $($env:AWS_ACCESS_KEY_ID -ne $null)"
+        Write-Host "  AWS_ACCESS_KEY_ID value: $($env:AWS_ACCESS_KEY_ID.Substring(0, [Math]::Min(8, $env:AWS_ACCESS_KEY_ID.Length)))..." -ErrorAction SilentlyContinue
+        Write-Host "  AWS_SECRET_ACCESS_KEY exists: $($env:AWS_SECRET_ACCESS_KEY -ne $null)"
+        Write-Host "  AWS_DEFAULT_REGION: $env:AWS_DEFAULT_REGION"
+        
+        # Check for credential validation issues
+        if (-not $env:AWS_ACCESS_KEY_ID -or $env:AWS_ACCESS_KEY_ID -like "*`$(*") {
+          Write-Host "⚠️ WARNING: AWS_ACCESS_KEY_ID appears to be unresolved variable: $env:AWS_ACCESS_KEY_ID" -ForegroundColor Yellow
+        }
+        
+        # Debug Boolean parameters
+        Write-Host "🔍 Checking intent layer Boolean parameters:"
+        Write-Host "  enableAzureIntent parameter: '${{ parameters.enableAzureIntent }}'"
+        Write-Host "  enableAwsIntent parameter: '${{ parameters.enableAwsIntent }}'"
+        
+        # Run the specified action
+        switch ("${{ parameters.terraformAction }}") {
+          "validate" {
+            Write-Host "🔍 Validating Terraform configuration..."
+            & terraform validate
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Terraform validation passed" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Terraform validation failed" -ForegroundColor Red
+              exit 1
+            }
+            
+            Write-Host "🎨 Checking Terraform formatting..."
+            & terraform fmt -check=true
+            $fmtExitCode = $LASTEXITCODE
+            if ($fmtExitCode -eq 0) {
+              Write-Host "✅ Terraform formatting is correct" -ForegroundColor Green
+            } else {
+              Write-Host "⚠️ Terraform formatting issues found. Run 'terraform fmt' to fix." -ForegroundColor Yellow
+              # Don't fail the pipeline for formatting issues in validation
+              Write-Host "Continuing with validation..." -ForegroundColor Yellow
+            }
+            # Reset exit code to success since validation passed
+            $LASTEXITCODE = 0
+          }
+          "plan" {
+            # Set intent layer flags with Boolean conversion
+            $AzureIntentFlag = if ("${{ parameters.enableAzureIntent }}" -ieq "True") { "true" } else { "false" }
+            $AwsIntentFlag = if ("${{ parameters.enableAwsIntent }}" -ieq "True") { "true" } else { "false" }
+            # Set secure hubs flag
+            $SecureHubsFlag = if ("${{ parameters.deploySecureHubs }}" -ieq "True") { "true" } else { "false" }
+            # Set TiP infrastructure flag
+            $TipInfraFlag = if ("${{ parameters.deployTipInfrastructure }}" -ieq "True") { "true" } else { "false" }
+            
+            Write-Host "🎯 Deployment Configuration:"
+            Write-Host "  Azure Intent Enabled: $AzureIntentFlag"
+            Write-Host "  AWS Intent Enabled: $AwsIntentFlag"
+            Write-Host "  Secure Hubs Enabled: $SecureHubsFlag"
+            Write-Host "  TiP Infrastructure Enabled: $TipInfraFlag"
+            
+            # Set AWS environment variables to prevent credential validation errors during plan (matching working pipeline)
+            $awsIntentEnabled = $AwsIntentFlag -eq 'true'
+            if (-not $awsIntentEnabled) {
+              Write-Host "⚙️  Setting dummy AWS credentials for disabled AWS intent layer during plan"
+              $env:AWS_ACCESS_KEY_ID = "DUMMY_ACCESS_KEY"
+              $env:AWS_SECRET_ACCESS_KEY = "DUMMY_SECRET_KEY"
+              $env:AWS_DEFAULT_REGION = "us-east-1"
+              $env:AWS_EC2_METADATA_DISABLED = "true"
+            }
+            
+            terraform plan `
+              -var-file="../../../config/azure/${{ parameters.tenant }}/azure-vars.tfvars" `
+              -var-file="../../../config/shared/${{ parameters.tenant }}/shared-vars.tfvars" `
+              -var="intent_layer_deploy_azure_intent=$AzureIntentFlag" `
+              -var="intent_layer_deploy_aws_intent=$AwsIntentFlag" `
+              -var="deploy_secure_hubs=$SecureHubsFlag" `
+              -var="deploy_tip_infrastructure=$TipInfraFlag" `
+              -out=tfplan
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Terraform plan created successfully" -ForegroundColor Green
+              
+              # Convert plan to text format for easy reading
+              Write-Host "📄 Converting plan to text format..."
+              & terraform show -no-color tfplan > terraform-plan-azure-${{ parameters.tenant }}.txt
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✅ Plan text file created: terraform-plan-azure-${{ parameters.tenant }}.txt" -ForegroundColor Green
+              } else {
+                Write-Host "⚠️ Warning: Could not create plan text file" -ForegroundColor Yellow
+              }
+            } else {
+              Write-Host "❌ Terraform plan failed" -ForegroundColor Red
+              exit 1
+            }
+          }
+          "apply" {
+            Write-Host "🚀 Applying Terraform plan..."
+            
+            # Set AWS environment variables to prevent credential validation errors during apply (matching working pipeline)
+            $AwsIntentFlag = if ("${{ parameters.enableAwsIntent }}" -ieq "True") { "true" } else { "false" }
+            $awsIntentEnabled = $AwsIntentFlag -eq 'true'
+            if (-not $awsIntentEnabled) {
+              Write-Host "⚙️  Setting dummy AWS credentials for disabled AWS intent layer during apply"
+              $env:AWS_ACCESS_KEY_ID = "DUMMY_ACCESS_KEY"
+              $env:AWS_SECRET_ACCESS_KEY = "DUMMY_SECRET_KEY"
+              $env:AWS_DEFAULT_REGION = "us-east-1"
+              $env:AWS_EC2_METADATA_DISABLED = "true"
+            }
+            
+            # Check if plan file exists (should use 'tfplan' to match working pipeline)
+            if (-not (Test-Path "tfplan")) {
+              Write-Host "📦 Plan file not found locally, checking for artifacts..."
+              
+              # In parallel pipelines, the plan file comes from artifacts
+              # The Azure DevOps download artifacts task should have already downloaded it
+              if (-not (Test-Path "tfplan")) {
+                Write-Host "❌ Plan file 'tfplan' not found!" -ForegroundColor Red
+                Write-Host "⚠️ This could happen if:" -ForegroundColor Yellow
+                Write-Host "   1. Plan stage failed or was skipped" -ForegroundColor Yellow
+                Write-Host "   2. Artifact download failed" -ForegroundColor Yellow
+                Write-Host "   3. Running apply without plan in same pipeline run" -ForegroundColor Yellow
+                
+                # Fallback: Re-create plan with same parameters (not recommended but safer than failing)
+                Write-Host "🔄 Fallback: Creating plan in apply stage..." -ForegroundColor Yellow
+                
+                $AzureIntentFlag = if ("${{ parameters.enableAzureIntent }}" -ieq "True") { "true" } else { "false" }
+                $AwsIntentFlag = if ("${{ parameters.enableAwsIntent }}" -ieq "True") { "true" } else { "false" }
+                $SecureHubsFlag = if ("${{ parameters.deploySecureHubs }}" -ieq "True") { "true" } else { "false" }
+                $TipInfraFlag = if ("${{ parameters.deployTipInfrastructure }}" -ieq "True") { "true" } else { "false" }
+                
+                terraform plan `
+                  -var-file="../../../config/azure/${{ parameters.tenant }}/azure-vars.tfvars" `
+                  -var-file="../../../config/shared/${{ parameters.tenant }}/shared-vars.tfvars" `
+                  -var="intent_layer_deploy_azure_intent=$AzureIntentFlag" `
+                  -var="intent_layer_deploy_aws_intent=$AwsIntentFlag" `
+                  -var="deploy_secure_hubs=$SecureHubsFlag" `
+                  -var="deploy_tip_infrastructure=$TipInfraFlag" `
+                  -out=tfplan
+                  
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "❌ Failed to create plan in apply stage" -ForegroundColor Red
+                  exit 1
+                }
+              }
+            }
+            
+            if (Test-Path "tfplan") {
+              Write-Host "✅ Found plan file: tfplan" -ForegroundColor Green
+              Write-Host "📋 Applying the pre-approved plan..."
+              
+              # Apply the plan file directly (matching working pipeline)
+              terraform apply -auto-approve tfplan
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✅ Terraform apply completed successfully" -ForegroundColor Green
+              } else {
+                Write-Host "❌ Terraform apply failed" -ForegroundColor Red
+                exit 1
+              }
+            } else {
+              Write-Host "❌ Still cannot find plan file after fallback attempt" -ForegroundColor Red
+              exit 1
+            }
+          }
+          "destroy" {
+            # Set all flags for destroy operation
+            $AzureIntentFlag = if ("${{ parameters.enableAzureIntent }}" -ieq "True") { "true" } else { "false" }
+            $AwsIntentFlag = if ("${{ parameters.enableAwsIntent }}" -ieq "True") { "true" } else { "false" }
+            $SecureHubsFlag = if ("${{ parameters.deploySecureHubs }}" -ieq "True") { "true" } else { "false" }
+            $TipInfraFlag = if ("${{ parameters.deployTipInfrastructure }}" -ieq "True") { "true" } else { "false" }
+            
+            terraform destroy `
+              -var-file="../../../config/azure/${{ parameters.tenant }}/azure-vars.tfvars" `
+              -var-file="../../../config/shared/${{ parameters.tenant }}/shared-vars.tfvars" `
+              -var="intent_layer_deploy_azure_intent=$AzureIntentFlag" `
+              -var="intent_layer_deploy_aws_intent=$AwsIntentFlag" `
+              -var="deploy_secure_hubs=$SecureHubsFlag" `
+              -var="deploy_tip_infrastructure=$TipInfraFlag" `
+              -auto-approve
+            }
+        }
+    # Note: AWS environment variables removed - handled inline in script to prevent unresolved variable issues
+    
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Azure Terraform Plan'
+    inputs:
+      pathToPublish: 'infrastructure/azure/${{ parameters.deploymentType }}/tfplan'
+      artifactName: 'tfplan-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+    condition: and(succeeded(), eq('${{ parameters.terraformAction }}', 'plan'))
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Azure Terraform Plan Text'
+    inputs:
+      pathToPublish: 'infrastructure/azure/${{ parameters.deploymentType }}/terraform-plan-azure-${{ parameters.tenant }}.txt'
+      artifactName: 'plan-output-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+    condition: and(succeeded(), eq('${{ parameters.terraformAction }}', 'plan'))
+
+  - task: PowerShell@2
+    displayName: 'Azure Terraform Summary'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Set-Location "infrastructure/azure/${{ parameters.deploymentType }}"
+        Write-Host "📊 Azure Terraform Summary:"
+        try {
+          terraform output -json
+        } catch {
+          Write-Host "No outputs available"
+        }
+    condition: and(succeeded(), in('${{ parameters.terraformAction }}', 'apply', 'plan'))

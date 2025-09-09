@@ -1,0 +1,125 @@
+# AWS Pipeline for ADIA Metropolis Multi-Cloud Platform
+# Azure DevOps Pipeline Configuration
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - infrastructure/aws/**
+      - config/aws/**
+      - pipelines/aws-pipelines.yml
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - infrastructure/aws/**
+      - config/aws/**
+
+variables:
+  - name: 'terraformVersion'
+    value: '1.6.0'
+  - name: 'awsRegion'
+    value: 'us-east-1'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: 'Validate'
+    displayName: 'Validate AWS Infrastructure'
+    jobs:
+      - job: 'TerraformValidate'
+        displayName: 'Terraform Validate & Plan'
+        steps:
+          - template: 'templates/terraform-aws-template.yml'
+            parameters:
+              terraformVersion: $(terraformVersion)
+              workingDirectory: 'infrastructure/aws/platform'
+              backendConfig: 'config/aws/$(environment)/s3.tfbackend'
+              varFile: 'config/aws/$(environment)/aws-vars.tfvars'
+              command: 'validate'
+
+      - job: 'SecurityScan'
+        displayName: 'Security Scanning'
+        steps:
+          - template: 'templates/security-scan-template.yml'
+            parameters:
+              cloudProvider: 'aws'
+              scanPath: 'infrastructure/aws/**'
+
+  - stage: 'Plan'
+    displayName: 'Plan AWS Infrastructure'
+    dependsOn: 'Validate'
+    condition: succeeded()
+    jobs:
+      - job: 'TerraformPlan'
+        displayName: 'Terraform Plan'
+        steps:
+          - template: 'templates/terraform-aws-template.yml'
+            parameters:
+              terraformVersion: $(terraformVersion)
+              workingDirectory: 'infrastructure/aws/platform'
+              backendConfig: 'config/aws/$(environment)/s3.tfbackend'
+              varFile: 'config/aws/$(environment)/aws-vars.tfvars'
+              command: 'plan'
+
+  - stage: 'Deploy'
+    displayName: 'Deploy AWS Infrastructure'
+    dependsOn: 'Plan'
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: 'TerraformApply'
+        displayName: 'Terraform Apply'
+        environment: 'adia-metropolis-aws-$(environment)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: 'templates/terraform-aws-template.yml'
+                  parameters:
+                    terraformVersion: $(terraformVersion)
+                    workingDirectory: 'infrastructure/aws/platform'
+                    backendConfig: 'config/aws/$(environment)/s3.tfbackend'
+                    varFile: 'config/aws/$(environment)/aws-vars.tfvars'
+                    command: 'apply'
+
+  - stage: 'PostDeploy'
+    displayName: 'Post-Deployment Validation'
+    dependsOn: 'Deploy'
+    condition: succeeded()
+    jobs:
+      - job: 'ValidationTests'
+        displayName: 'Infrastructure Validation'
+        steps:
+          - script: |
+              echo "Validating Transit Gateway deployment..."
+              aws ec2 describe-transit-gateways --region $(awsRegion)
+              
+              echo "Validating Organizations setup..."
+              aws organizations describe-organization
+              
+              echo "Validating GuardDuty deployment..."
+              aws guardduty list-detectors --region $(awsRegion)
+            displayName: 'Validate AWS Resources'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_DEFAULT_REGION: $(awsRegion)
+
+      - job: 'CrossCloudConnectivity'
+        displayName: 'Cross-Cloud Connectivity Tests'
+        steps:
+          - script: |
+              echo "Testing cross-cloud connectivity will be implemented here"
+              echo "This would include:"
+              echo "- Testing ExpressRoute/Direct Connect connectivity"
+              echo "- Validating DNS resolution across clouds"
+              echo "- Testing identity federation"
+            displayName: 'Cross-Cloud Connectivity Tests'

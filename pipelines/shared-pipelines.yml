@@ -1,0 +1,212 @@
+# Shared Multi-Cloud Pipeline for ADIA Metropolis
+# Deploys cross-cloud shared modules like Intent Layer
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - infrastructure/shared/**
+      - config/shared/**
+      - pipelines/shared-pipelines.yml
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - infrastructure/shared/**
+      - config/shared/**
+
+variables:
+  - group: 'adia-metropolis-shared-secrets'
+  - name: 'terraformVersion'
+    value: '1.6.0'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: 'Prerequisites'
+    displayName: 'Validate Prerequisites'
+    jobs:
+      - job: 'CheckPlatforms'
+        displayName: 'Check Platform Readiness'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Validate Azure Platform'
+            inputs:
+              azureSubscription: 'azure-service-connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Checking Azure Virtual WAN deployment..."
+                az network vwan list --output table
+                
+                echo "Checking Azure Virtual Network Manager..."
+                az network manager list --output table
+
+          - task: AWSShellScript@1
+            displayName: 'Validate AWS Platform'
+            inputs:
+              awsCredentials: 'aws-service-connection'
+              regionName: 'us-east-1'
+              scriptType: 'inline'
+              inlineScript: |
+                echo "Checking AWS Transit Gateway deployment..."
+                aws ec2 describe-transit-gateways --region us-east-1
+                
+                echo "Checking AWS Organizations..."
+                aws organizations describe-organization
+
+  - stage: 'Validate'
+    displayName: 'Validate Coordination Infrastructure'
+    dependsOn: 'Prerequisites'
+    condition: succeeded()
+    jobs:
+      - job: 'TerraformValidate'
+        displayName: 'Terraform Validate'
+        steps:
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - script: |
+              cd infrastructure/coordination
+              terraform init -backend=false
+              terraform validate
+            displayName: 'Validate Coordination Infrastructure'
+
+          - script: |
+              cd infrastructure/shared
+              terraform init -backend=false
+              terraform validate
+            displayName: 'Validate Shared Infrastructure'
+
+      - job: 'SecurityScan'
+        displayName: 'Security Scanning'
+        steps:
+          - template: 'templates/security-scan-template.yml'
+            parameters:
+              cloudProvider: 'multicloud'
+              scanPath: 'infrastructure/coordination/**,infrastructure/shared/**'
+
+  - stage: 'Plan'
+    displayName: 'Plan Coordination Infrastructure'
+    dependsOn: 'Validate'
+    condition: succeeded()
+    jobs:
+      - job: 'TerraformPlan'
+        displayName: 'Terraform Plan'
+        steps:
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - script: |
+              cd infrastructure/coordination
+              terraform init -backend-config="../config/coordination/$(environment)/coordination-backend.tfvars"
+              terraform plan -var-file="../config/coordination/$(environment)/coordination-vars.tfvars" -out=coordination.tfplan
+            displayName: 'Plan Coordination Infrastructure'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Terraform Plan'
+            inputs:
+              pathToPublish: 'infrastructure/coordination/coordination.tfplan'
+              artifactName: 'terraform-plan'
+
+  - stage: 'Deploy'
+    displayName: 'Deploy Coordination Infrastructure'
+    dependsOn: 'Plan'
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: 'TerraformApply'
+        displayName: 'Deploy Cross-Cloud Coordination'
+        environment: 'adia-metropolis-coordination-$(environment)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadBuildArtifacts@0
+                  displayName: 'Download Terraform Plan'
+                  inputs:
+                    artifactName: 'terraform-plan'
+                    downloadPath: '$(System.ArtifactsDirectory)'
+
+                - task: TerraformInstaller@0
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: $(terraformVersion)
+
+                - script: |
+                    cd infrastructure/coordination
+                    terraform init -backend-config="../config/coordination/$(environment)/coordination-backend.tfvars"
+                    terraform apply $(System.ArtifactsDirectory)/terraform-plan/coordination.tfplan
+                  displayName: 'Apply Coordination Infrastructure'
+
+  - stage: 'PostDeploy'
+    displayName: 'Post-Deployment Validation'
+    dependsOn: 'Deploy'
+    condition: succeeded()
+    jobs:
+      - job: 'ConnectivityTests'
+        displayName: 'Cross-Cloud Connectivity Tests'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Test Azure Connectivity'
+            inputs:
+              azureSubscription: 'azure-service-connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Testing Azure Virtual WAN connectivity..."
+                # Add specific connectivity tests here
+
+          - task: AWSShellScript@1
+            displayName: 'Test AWS Connectivity'
+            inputs:
+              awsCredentials: 'aws-service-connection'
+              regionName: 'us-east-1'
+              scriptType: 'inline'
+              inlineScript: |
+                echo "Testing AWS Transit Gateway connectivity..."
+                # Add specific connectivity tests here
+
+      - job: 'DNSTests'
+        displayName: 'Cross-Cloud DNS Tests'
+        steps:
+          - script: |
+              echo "Testing cross-cloud DNS resolution..."
+              echo "This would include:"
+              echo "- Testing Azure Private DNS to AWS Route 53 resolution"
+              echo "- Testing AWS Route 53 to Azure Private DNS resolution"
+              echo "- Validating DNS forwarding rules"
+            displayName: 'DNS Resolution Tests'
+
+      - job: 'IdentityTests'
+        displayName: 'Federated Identity Tests'
+        steps:
+          - script: |
+              echo "Testing federated identity..."
+              echo "This would include:"
+              echo "- Testing Azure AD to AWS IAM federation"
+              echo "- Testing cross-cloud service authentication"
+              echo "- Validating RBAC policies"
+            displayName: 'Identity Federation Tests'
+
+      - job: 'MonitoringTests'
+        displayName: 'Unified Monitoring Tests'
+        steps:
+          - script: |
+              echo "Testing unified monitoring..."
+              echo "This would include:"
+              echo "- Testing cross-cloud metrics collection"
+              echo "- Testing alert routing"
+              echo "- Validating dashboard integration"
+            displayName: 'Monitoring Integration Tests'

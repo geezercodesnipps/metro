@@ -1,0 +1,1386 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infrastructure/*
+      - config/*
+      - azure-pipelines.yml
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infrastructure/*
+      - config/*
+
+parameters:
+  - name: environment
+    displayName: 'Environment to deploy'
+    type: string
+    default: 'dev'
+    values:
+      - dev
+      - staging
+      - prod  
+  - name: tenant
+    displayName: 'Tenant configuration'
+    type: string
+    default: 'Tenant001'
+    values:
+      - Tenant001
+      - Tenant002
+  - name: deploymentType
+    displayName: 'Deployment type'
+    type: string
+    default: 'platform'
+    values:
+      - platform
+      - landing-zone
+      - coordination
+  - name: cloudProvider
+    displayName: 'Cloud Provider(s) to deploy'
+    type: string
+    default: 'azure'
+    values:
+      - azure
+      - aws
+      - both
+      - coordination
+  - name: action
+    displayName: 'Action to perform'
+    type: string
+    default: 'plan'
+    values:
+      - plan
+      - apply
+      - destroy
+  - name: agentPool
+    displayName: 'Agent pool to use'
+    type: string
+    default: 'selfhosted'
+    values:
+      - selfhosted
+  - name: enableAzureIntent
+    displayName: 'Enable Azure Intent Layer (AVNM Security Admin Rules)'
+    type: boolean
+    default: true
+  - name: enableAwsIntent
+    displayName: 'Enable AWS Intent Layer (Security Groups via AWS Firewall Manager)'
+    type: boolean
+    default: false
+  - name: deployTestVMs
+    displayName: 'TiP'
+    type: boolean
+    default: false
+
+variables:
+  - name: terraformVersion
+    value: '1.7.5'
+  - name: azureServiceConnection
+    value: 'Adia_Deploy'  # Using existing service connection
+  # - name: awsServiceConnection
+  #   value: 'AWS_Service_Connection'  # AWS service connection - DISABLED: using environment variables
+  - name: azureBackendConfig
+    value: 'config/azure/${{ parameters.tenant }}/azurerm.tfbackend'
+  - name: azureTfvarsFile
+    value: 'config/azure/${{ parameters.tenant }}/azure-vars.tfvars'
+  - name: awsBackendConfig
+    value: 'config/aws/${{ parameters.tenant }}/s3.tfbackend'
+  - name: awsTfvarsFile
+    value: 'config/aws/${{ parameters.tenant }}/aws-vars.tfvars'
+  - name: coordinationTfvarsFile
+    value: 'config/coordination/${{ parameters.tenant }}/coordination-vars.tfvars'
+  - group: snyk-security-variables  # Contains SNYK_TOKEN secret variable
+  # - group: aws-credentials  # Contains AWS access credentials - DISABLED: using pipeline variables instead
+
+# Self-hosted agent pool configuration
+pool:
+  name: 'selfhosted'
+
+stages:
+  - stage: SnykSecurityScan
+    displayName: 'Snyk Security Scanning'
+    condition: always()
+    jobs:
+      - job: SnykScan
+        displayName: 'Snyk Infrastructure as Code Security Scan'
+        timeoutInMinutes: 30
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Install Snyk CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "📦 Installing Snyk CLI..."
+                
+                # First, check if Node.js and npm are available
+                try {
+                  $nodeVersion = node --version
+                  $npmVersion = npm --version
+                  Write-Host "✅ Node.js version: $nodeVersion"
+                  Write-Host "✅ npm version: $npmVersion"
+                } catch {
+                  Write-Host "❌ Node.js or npm not found. Installing via direct download..."
+                  # Skip npm installation and go directly to binary download
+                  $useDirectDownload = $true
+                }
+                
+                if (-not $useDirectDownload) {
+                  # Try npm installation first
+                  Write-Host "Installing Snyk CLI via npm..."
+                  npm install -g snyk
+                  
+                  if ($LASTEXITCODE -eq 0) {
+                    Write-Host "✅ Snyk CLI installed via npm"
+                    
+                    # Find npm global modules path and add to PATH
+                    try {
+                      $npmPath = npm config get prefix
+                      if ($npmPath) {
+                        # Set pipeline variables for subsequent tasks
+                        Write-Host "##vso[task.setvariable variable=SNYK_NPM_PATH]$npmPath"
+                        Write-Host "##vso[task.setvariable variable=SNYK_INSTALL_METHOD]npm"
+                        
+                        $npmBinPath = Join-Path $npmPath "bin"
+                        if (Test-Path $npmBinPath) {
+                          $env:PATH = "$npmBinPath;$env:PATH"
+                          Write-Host "✅ Added npm bin path to PATH: $npmBinPath"
+                          Write-Host "##vso[task.setvariable variable=SNYK_BIN_PATH]$npmBinPath"
+                        }
+                        
+                        # Also try the direct npm path
+                        $env:PATH = "$npmPath;$env:PATH"
+                        Write-Host "✅ Added npm prefix to PATH: $npmPath"
+                        
+                        # Find the actual Snyk executable
+                        $snykCommand = Get-Command snyk -ErrorAction SilentlyContinue
+                        if ($snykCommand) {
+                          Write-Host "✅ Snyk CLI found at: $($snykCommand.Path)"
+                          Write-Host "##vso[task.setvariable variable=SNYK_EXECUTABLE_PATH]$($snykCommand.Path)"
+                          
+                          & snyk --version
+                          if ($LASTEXITCODE -eq 0) {
+                            Write-Host "✅ Snyk CLI is working correctly"
+                            $snykInstalled = $true
+                          }
+                        }
+                      }
+                    } catch {
+                      Write-Host "⚠️ Could not configure PATH for npm-installed Snyk"
+                    }
+                  }
+                }
+                
+                # If npm installation failed or snyk still not working, use direct download
+                if (-not $snykInstalled) {
+                  Write-Host "Attempting direct download of Snyk binary..."
+                  $snykUrl = "https://static.snyk.io/cli/latest/snyk-win.exe"
+                  $snykPath = "$env:TEMP\snyk.exe"
+                  
+                  try {
+                    Write-Host "Downloading from: $snykUrl"
+                    Invoke-WebRequest -Uri $snykUrl -OutFile $snykPath -UseBasicParsing
+                    Write-Host "✅ Snyk binary downloaded to $snykPath"
+                    
+                    # Set pipeline variables for subsequent tasks
+                    Write-Host "##vso[task.setvariable variable=SNYK_EXECUTABLE_PATH]$snykPath"
+                    Write-Host "##vso[task.setvariable variable=SNYK_INSTALL_METHOD]binary"
+                    
+                    # Add temp directory to PATH for current session
+                    $env:PATH = "$env:TEMP;$env:PATH"
+                    
+                    # Test the downloaded binary
+                    Write-Host "Testing Snyk binary..."
+                    & $snykPath --version
+                    if ($LASTEXITCODE -eq 0) {
+                      Write-Host "✅ Snyk CLI ready for use via direct download"
+                      $snykInstalled = $true
+                    } else {
+                      Write-Host "❌ Downloaded Snyk binary is not working"
+                      exit 1
+                    }
+                  } catch {
+                    Write-Host "❌ Failed to download Snyk binary: $($_.Exception.Message)"
+                    Write-Host "Please ensure the agent has internet access and can download from static.snyk.io"
+                    exit 1
+                  }
+                }
+                
+                # Final verification and variable setting
+                if ($snykInstalled) {
+                  Write-Host "🔍 Final verification of Snyk CLI..."
+                  $executablePath = $env:SNYK_EXECUTABLE_PATH
+                  if (-not $executablePath) {
+                    # Try to find it again
+                    if (Get-Command snyk -ErrorAction SilentlyContinue) {
+                      $executablePath = (Get-Command snyk).Path
+                    } elseif (Test-Path "$env:TEMP\snyk.exe") {
+                      $executablePath = "$env:TEMP\snyk.exe"
+                    }
+                    Write-Host "##vso[task.setvariable variable=SNYK_EXECUTABLE_PATH]$executablePath"
+                  }
+                  
+                  if ($executablePath -and (Test-Path $executablePath)) {
+                    & $executablePath --version
+                    Write-Host "✅ Snyk CLI installation completed successfully"
+                    Write-Host "✅ Snyk executable path: $executablePath"
+                  } else {
+                    Write-Host "❌ Snyk CLI installation verification failed"
+                    exit 1
+                  }
+                } else {
+                  Write-Host "❌ Snyk CLI installation failed"
+                  exit 1
+                }
+
+          - task: PowerShell@2
+            displayName: 'Snyk Authentication'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "🔐 Authenticating with Snyk..."
+                
+                # Check if SNYK_TOKEN is available as environment variable or secret
+                if (-not $env:SNYK_TOKEN) {
+                  Write-Host "⚠️ SNYK_TOKEN environment variable not found"
+                  Write-Host "Please configure SNYK_TOKEN as a pipeline secret variable"
+                  Write-Host "You can get your token from: https://app.snyk.io/account"
+                  exit 1
+                }
+                
+                Write-Host "✅ Snyk token found, authenticating..."
+                
+                # Get Snyk executable path from pipeline variables
+                $snykCmd = $env:SNYK_EXECUTABLE_PATH
+                $installMethod = $env:SNYK_INSTALL_METHOD
+                
+                Write-Host "Install method: $installMethod"
+                Write-Host "Snyk executable path: $snykCmd"
+                
+                # Fallback logic if pipeline variables aren't available
+                if (-not $snykCmd -or -not (Test-Path $snykCmd)) {
+                  Write-Host "⚠️ Pipeline variable not set, attempting to locate Snyk CLI..."
+                  
+                  # Try to find via Get-Command first
+                  $snykCommand = Get-Command snyk -ErrorAction SilentlyContinue
+                  if ($snykCommand) {
+                    $snykCmd = $snykCommand.Path
+                    Write-Host "✅ Found Snyk via Get-Command: $snykCmd"
+                  }
+                  # Try npm path if we have it
+                  elseif ($env:SNYK_NPM_PATH) {
+                    $npmSnykPath = Join-Path $env:SNYK_NPM_PATH "snyk.ps1"
+                    if (Test-Path $npmSnykPath) {
+                      $snykCmd = $npmSnykPath
+                      Write-Host "✅ Found Snyk via npm path: $snykCmd"
+                    }
+                  }
+                  # Try temp directory
+                  elseif (Test-Path "$env:TEMP\snyk.exe") {
+                    $snykCmd = "$env:TEMP\snyk.exe"
+                    Write-Host "✅ Found Snyk in temp: $snykCmd"
+                  }
+                  else {
+                    Write-Host "❌ Snyk CLI not found anywhere"
+                    Write-Host "Available executables in PATH:"
+                    Get-Command snyk* -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name) - $($_.Path)" }
+                    exit 1
+                  }
+                }
+                
+                # Authenticate with Snyk
+                try {
+                  Write-Host "Using Snyk CLI: $snykCmd"
+                  & $snykCmd auth $env:SNYK_TOKEN
+                  if ($LASTEXITCODE -eq 0) {
+                    Write-Host "✅ Snyk authentication successful"
+                    
+                    # Test authentication by running a simple command
+                    & $snykCmd config get api
+                    Write-Host "✅ Snyk authentication verified"
+                  } else {
+                    Write-Host "❌ Snyk authentication failed (exit code: $LASTEXITCODE)"
+                    Write-Host "Please verify your SNYK_TOKEN is valid"
+                    exit 1
+                  }
+                } catch {
+                  Write-Host "❌ Snyk authentication failed: $($_.Exception.Message)"
+                  exit 1
+                }
+            env:
+              SNYK_TOKEN: $(SNYK_TOKEN)
+              SNYK_EXECUTABLE_PATH: $(SNYK_EXECUTABLE_PATH)
+              SNYK_INSTALL_METHOD: $(SNYK_INSTALL_METHOD)
+              SNYK_NPM_PATH: $(SNYK_NPM_PATH)
+
+          - task: PowerShell@2
+            displayName: 'Snyk IaC Scan - Azure Infrastructure'
+            condition: or(eq('${{ parameters.cloudProvider }}', 'azure'), eq('${{ parameters.cloudProvider }}', 'both'))
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "🔍 Running Snyk Infrastructure as Code scan on Azure Infrastructure..."
+                
+                # Get Snyk executable path from pipeline variables
+                $snykCmd = $env:SNYK_EXECUTABLE_PATH
+                
+                # Fallback logic if pipeline variables aren't available
+                if (-not $snykCmd -or -not (Test-Path $snykCmd)) {
+                  Write-Host "⚠️ Pipeline variable not set, attempting to locate Snyk CLI..."
+                  
+                  $snykCommand = Get-Command snyk -ErrorAction SilentlyContinue
+                  if ($snykCommand) {
+                    $snykCmd = $snykCommand.Path
+                    Write-Host "✅ Found Snyk via Get-Command: $snykCmd"
+                  } elseif ($env:SNYK_NPM_PATH) {
+                    $npmSnykPath = Join-Path $env:SNYK_NPM_PATH "snyk.ps1"
+                    if (Test-Path $npmSnykPath) {
+                      $snykCmd = $npmSnykPath
+                      Write-Host "✅ Found Snyk via npm path: $snykCmd"
+                    }
+                  } elseif (Test-Path "$env:TEMP\snyk.exe") {
+                    $snykCmd = "$env:TEMP\snyk.exe"
+                    Write-Host "✅ Found Snyk in temp: $snykCmd"
+                  } else {
+                    Write-Host "❌ Snyk CLI not found anywhere"
+                    exit 1
+                  }
+                }
+                
+                Write-Host "Using Snyk command: $snykCmd"
+                
+                # Scan Azure platform infrastructure
+                if (Test-Path "infrastructure/azure/platform") {
+                  Set-Location "infrastructure/azure/platform"
+                  
+                  Write-Host "Scanning Azure platform Terraform files for security issues..."
+                  
+                  # Run JSON output scan
+                  & $snykCmd iac test --severity-threshold=medium --json --json-file-output=snyk-azure-platform-results.json .
+                  $azurePlatformExitCode = $LASTEXITCODE
+                  
+                  # Also generate human-readable output
+                  & $snykCmd iac test --severity-threshold=medium . | Tee-Object -FilePath "snyk-azure-platform-report.txt"
+                  
+                  if ($azurePlatformExitCode -eq 0) {
+                    Write-Host "✅ No medium/high/critical security issues found in Azure platform"
+                  } elseif ($azurePlatformExitCode -eq 1) {
+                    Write-Host "⚠️ Security issues found in Azure platform - check results"
+                  } else {
+                    Write-Host "❌ Snyk scan failed for Azure platform (exit code: $azurePlatformExitCode)"
+                  }
+                  
+                  # Move results to root for artifact publishing
+                  if (Test-Path "snyk-azure-platform-results.json") {
+                    Move-Item "snyk-azure-platform-results.json" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved Azure platform JSON results"
+                  }
+                  if (Test-Path "snyk-azure-platform-report.txt") {
+                    Move-Item "snyk-azure-platform-report.txt" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved Azure platform text report"
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ Azure platform directory not found, skipping Azure platform scan"
+                }
+                
+                # Scan Azure landing zones
+                if (Test-Path "infrastructure/azure/landing-zones") {
+                  Set-Location "infrastructure/azure/landing-zones"
+                  
+                  Write-Host "Scanning Azure landing zones Terraform files for security issues..."
+                  
+                  # Run JSON output scan
+                  & $snykCmd iac test --severity-threshold=medium --json --json-file-output=snyk-azure-lz-results.json .
+                  $azureLzExitCode = $LASTEXITCODE
+                  
+                  # Also generate human-readable output
+                  & $snykCmd iac test --severity-threshold=medium . | Tee-Object -FilePath "snyk-azure-lz-report.txt"
+                  
+                  if ($azureLzExitCode -eq 0) {
+                    Write-Host "✅ No medium/high/critical security issues found in Azure landing zones"
+                  } elseif ($azureLzExitCode -eq 1) {
+                    Write-Host "⚠️ Security issues found in Azure landing zones - check results"
+                  } else {
+                    Write-Host "❌ Snyk scan failed for Azure landing zones (exit code: $azureLzExitCode)"
+                  }
+                  
+                  # Move results to root for artifact publishing
+                  if (Test-Path "snyk-azure-lz-results.json") {
+                    Move-Item "snyk-azure-lz-results.json" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved Azure LZ JSON results"
+                  }
+                  if (Test-Path "snyk-azure-lz-report.txt") {
+                    Move-Item "snyk-azure-lz-report.txt" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved Azure LZ text report"
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ Azure landing zones directory not found, skipping Azure LZ scan"
+                }
+            continueOnError: true
+            env:
+              SNYK_EXECUTABLE_PATH: $(SNYK_EXECUTABLE_PATH)
+              SNYK_NPM_PATH: $(SNYK_NPM_PATH)
+
+          - task: PowerShell@2
+            displayName: 'Snyk IaC Scan - AWS Infrastructure'
+            condition: or(eq('${{ parameters.cloudProvider }}', 'aws'), eq('${{ parameters.cloudProvider }}', 'both'))
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "🔍 Running Snyk Infrastructure as Code scan on AWS Infrastructure..."
+                
+                # Get Snyk executable path from pipeline variables
+                $snykCmd = $env:SNYK_EXECUTABLE_PATH
+                
+                # Fallback logic if pipeline variables aren't available
+                if (-not $snykCmd -or -not (Test-Path $snykCmd)) {
+                  Write-Host "⚠️ Pipeline variable not set, attempting to locate Snyk CLI..."
+                  
+                  $snykCommand = Get-Command snyk -ErrorAction SilentlyContinue
+                  if ($snykCommand) {
+                    $snykCmd = $snykCommand.Path
+                    Write-Host "✅ Found Snyk via Get-Command: $snykCmd"
+                  } elseif ($env:SNYK_NPM_PATH) {
+                    $npmSnykPath = Join-Path $env:SNYK_NPM_PATH "snyk.ps1"
+                    if (Test-Path $npmSnykPath) {
+                      $snykCmd = $npmSnykPath
+                      Write-Host "✅ Found Snyk via npm path: $snykCmd"
+                    }
+                  } elseif (Test-Path "$env:TEMP\snyk.exe") {
+                    $snykCmd = "$env:TEMP\snyk.exe"
+                    Write-Host "✅ Found Snyk in temp: $snykCmd"
+                  } else {
+                    Write-Host "❌ Snyk CLI not found anywhere"
+                    exit 1
+                  }
+                }
+                
+                Write-Host "Using Snyk command: $snykCmd"
+                
+                # Scan AWS platform infrastructure
+                if (Test-Path "infrastructure/aws/platform") {
+                  Set-Location "infrastructure/aws/platform"
+                  
+                  Write-Host "Scanning AWS platform Terraform files for security issues..."
+                  
+                  # Run JSON output scan
+                  & $snykCmd iac test --severity-threshold=medium --json --json-file-output=snyk-aws-platform-results.json .
+                  $awsPlatformExitCode = $LASTEXITCODE
+                  
+                  # Also generate human-readable output
+                  & $snykCmd iac test --severity-threshold=medium . | Tee-Object -FilePath "snyk-aws-platform-report.txt"
+                  
+                  if ($awsPlatformExitCode -eq 0) {
+                    Write-Host "✅ No medium/high/critical security issues found in AWS platform"
+                  } elseif ($awsPlatformExitCode -eq 1) {
+                    Write-Host "⚠️ Security issues found in AWS platform - check results"
+                  } else {
+                    Write-Host "❌ Snyk scan failed for AWS platform (exit code: $awsPlatformExitCode)"
+                  }
+                  
+                  # Move results to root for artifact publishing
+                  if (Test-Path "snyk-aws-platform-results.json") {
+                    Move-Item "snyk-aws-platform-results.json" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved AWS platform JSON results"
+                  }
+                  if (Test-Path "snyk-aws-platform-report.txt") {
+                    Move-Item "snyk-aws-platform-report.txt" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved AWS platform text report"
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ AWS platform directory not found, skipping AWS platform scan"
+                }
+                
+                # Scan AWS landing zones
+                if (Test-Path "infrastructure/aws/landing-zones") {
+                  Set-Location "infrastructure/aws/landing-zones"
+                  
+                  Write-Host "Scanning AWS landing zones Terraform files for security issues..."
+                  
+                  # Run JSON output scan
+                  & $snykCmd iac test --severity-threshold=medium --json --json-file-output=snyk-aws-lz-results.json .
+                  $awsLzExitCode = $LASTEXITCODE
+                  
+                  # Also generate human-readable output
+                  & $snykCmd iac test --severity-threshold=medium . | Tee-Object -FilePath "snyk-aws-lz-report.txt"
+                  
+                  if ($awsLzExitCode -eq 0) {
+                    Write-Host "✅ No medium/high/critical security issues found in AWS landing zones"
+                  } elseif ($awsLzExitCode -eq 1) {
+                    Write-Host "⚠️ Security issues found in AWS landing zones - check results"
+                  } else {
+                    Write-Host "❌ Snyk scan failed for AWS landing zones (exit code: $awsLzExitCode)"
+                  }
+                  
+                  # Move results to root for artifact publishing
+                  if (Test-Path "snyk-aws-lz-results.json") {
+                    Move-Item "snyk-aws-lz-results.json" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved AWS LZ JSON results"
+                  }
+                  if (Test-Path "snyk-aws-lz-report.txt") {
+                    Move-Item "snyk-aws-lz-report.txt" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved AWS LZ text report"
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ AWS landing zones directory not found, skipping AWS LZ scan"
+                }
+            continueOnError: true
+            env:
+              SNYK_EXECUTABLE_PATH: $(SNYK_EXECUTABLE_PATH)
+              SNYK_NPM_PATH: $(SNYK_NPM_PATH)
+
+          - task: PowerShell@2
+            displayName: 'Snyk IaC Scan - Coordination Infrastructure'
+            condition: or(eq('${{ parameters.cloudProvider }}', 'coordination'), eq('${{ parameters.cloudProvider }}', 'both'))
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "🔍 Running Snyk Infrastructure as Code scan on Coordination Infrastructure..."
+                
+                # Get Snyk executable path from pipeline variables
+                $snykCmd = $env:SNYK_EXECUTABLE_PATH
+                
+                # Fallback logic if pipeline variables aren't available
+                if (-not $snykCmd -or -not (Test-Path $snykCmd)) {
+                  Write-Host "⚠️ Pipeline variable not set, attempting to locate Snyk CLI..."
+                  
+                  $snykCommand = Get-Command snyk -ErrorAction SilentlyContinue
+                  if ($snykCommand) {
+                    $snykCmd = $snykCommand.Path
+                    Write-Host "✅ Found Snyk via Get-Command: $snykCmd"
+                  } elseif ($env:SNYK_NPM_PATH) {
+                    $npmSnykPath = Join-Path $env:SNYK_NPM_PATH "snyk.ps1"
+                    if (Test-Path $npmSnykPath) {
+                      $snykCmd = $npmSnykPath
+                      Write-Host "✅ Found Snyk via npm path: $snykCmd"
+                    }
+                  } elseif (Test-Path "$env:TEMP\snyk.exe") {
+                    $snykCmd = "$env:TEMP\snyk.exe"
+                    Write-Host "✅ Found Snyk in temp: $snykCmd"
+                  } else {
+                    Write-Host "❌ Snyk CLI not found anywhere"
+                    exit 1
+                  }
+                }
+                
+                Write-Host "Using Snyk command: $snykCmd"
+                
+                # Scan coordination infrastructure
+                if (Test-Path "infrastructure/coordination") {
+                  Set-Location "infrastructure/coordination"
+                  
+                  Write-Host "Scanning coordination Terraform files for security issues..."
+                  
+                  # Run JSON output scan
+                  & $snykCmd iac test --severity-threshold=medium --json --json-file-output=snyk-coordination-results.json .
+                  $coordinationExitCode = $LASTEXITCODE
+                  
+                  # Also generate human-readable output
+                  & $snykCmd iac test --severity-threshold=medium . | Tee-Object -FilePath "snyk-coordination-report.txt"
+                  
+                  if ($coordinationExitCode -eq 0) {
+                    Write-Host "✅ No medium/high/critical security issues found in coordination infrastructure"
+                  } elseif ($coordinationExitCode -eq 1) {
+                    Write-Host "⚠️ Security issues found in coordination infrastructure - check results"
+                  } else {
+                    Write-Host "❌ Snyk scan failed for coordination infrastructure (exit code: $coordinationExitCode)"
+                  }
+                  
+                  # Move results to root for artifact publishing
+                  if (Test-Path "snyk-coordination-results.json") {
+                    Move-Item "snyk-coordination-results.json" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved coordination JSON results"
+                  }
+                  if (Test-Path "snyk-coordination-report.txt") {
+                    Move-Item "snyk-coordination-report.txt" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved coordination text report"
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ Coordination directory not found, skipping coordination scan"
+                }
+                
+                # Scan shared infrastructure
+                if (Test-Path "infrastructure/shared") {
+                  Set-Location "infrastructure/shared"
+                  
+                  Write-Host "Scanning shared Terraform files for security issues..."
+                  
+                  # Run JSON output scan
+                  & $snykCmd iac test --severity-threshold=medium --json --json-file-output=snyk-shared-results.json .
+                  $sharedExitCode = $LASTEXITCODE
+                  
+                  # Also generate human-readable output
+                  & $snykCmd iac test --severity-threshold=medium . | Tee-Object -FilePath "snyk-shared-report.txt"
+                  
+                  if ($sharedExitCode -eq 0) {
+                    Write-Host "✅ No medium/high/critical security issues found in shared infrastructure"
+                  } elseif ($sharedExitCode -eq 1) {
+                    Write-Host "⚠️ Security issues found in shared infrastructure - check results"
+                  } else {
+                    Write-Host "❌ Snyk scan failed for shared infrastructure (exit code: $sharedExitCode)"
+                  }
+                  
+                  # Move results to root for artifact publishing
+                  if (Test-Path "snyk-shared-results.json") {
+                    Move-Item "snyk-shared-results.json" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved shared JSON results"
+                  }
+                  if (Test-Path "snyk-shared-report.txt") {
+                    Move-Item "snyk-shared-report.txt" "$(System.DefaultWorkingDirectory)/" -ErrorAction SilentlyContinue
+                    Write-Host "✅ Moved shared text report"
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ Shared directory not found, skipping shared scan"
+                }
+            continueOnError: true
+            env:
+              SNYK_EXECUTABLE_PATH: $(SNYK_EXECUTABLE_PATH)
+              SNYK_NPM_PATH: $(SNYK_NPM_PATH)
+
+          - task: PowerShell@2
+            displayName: 'Process Snyk Results'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "📊 Processing Snyk scan results..."
+                
+                $criticalIssues = 0
+                $highIssues = 0
+                $mediumIssues = 0
+                
+                # Process platform results
+                if (Test-Path "snyk-platform-results.json") {
+                  Write-Host "Processing platform results..."
+                  $platformResults = Get-Content "snyk-platform-results.json" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                  if ($platformResults -and $platformResults.vulnerabilities) {
+                    foreach ($vuln in $platformResults.vulnerabilities) {
+                      switch ($vuln.severity) {
+                        "critical" { $criticalIssues++ }
+                        "high" { $highIssues++ }
+                        "medium" { $mediumIssues++ }
+                      }
+                    }
+                  }
+                }
+                
+                # Process landing zone results
+                if (Test-Path "snyk-lz-results.json") {
+                  Write-Host "Processing landing zone results..."
+                  $lzResults = Get-Content "snyk-lz-results.json" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                  if ($lzResults -and $lzResults.vulnerabilities) {
+                    foreach ($vuln in $lzResults.vulnerabilities) {
+                      switch ($vuln.severity) {
+                        "critical" { $criticalIssues++ }
+                        "high" { $highIssues++ }
+                        "medium" { $mediumIssues++ }
+                      }
+                    }
+                  }
+                }
+                
+                Write-Host ""
+                Write-Host "## 🛡️ Snyk Security Scan Summary"
+                Write-Host "- **Critical Issues**: $criticalIssues"
+                Write-Host "- **High Issues**: $highIssues"
+                Write-Host "- **Medium Issues**: $mediumIssues"
+                Write-Host ""
+                
+                # Set pipeline variables for downstream stages
+                Write-Host "##vso[task.setvariable variable=snykCriticalIssues;isOutput=true]$criticalIssues"
+                Write-Host "##vso[task.setvariable variable=snykHighIssues;isOutput=true]$highIssues"
+                Write-Host "##vso[task.setvariable variable=snykMediumIssues;isOutput=true]$mediumIssues"
+                
+                # Determine if we should fail the pipeline
+                if ($criticalIssues -gt 0) {
+                  Write-Host "❌ Critical security issues found - failing pipeline"
+                  Write-Host "Please review and fix critical security issues before proceeding"
+                  exit 1
+                } elseif ($highIssues -gt 10) {
+                  Write-Host "⚠️ Too many high severity issues found ($highIssues > 10)"
+                  Write-Host "Consider reviewing and fixing high severity issues"
+                  # Uncomment the next line if you want to fail on too many high issues
+                  # exit 1
+                } else {
+                  Write-Host "✅ Security scan passed - no critical issues found"
+                }
+            name: 'snykResults'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Snyk Results - JSON'
+            condition: always()
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)'
+              artifact: 'snyk-security-results'
+              publishLocation: 'pipeline'
+              pathToPublish: '$(System.DefaultWorkingDirectory)/snyk-*-results.json'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Snyk Reports - Text'
+            condition: always()
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)'
+              artifact: 'snyk-security-reports'
+              publishLocation: 'pipeline'
+              pathToPublish: '$(System.DefaultWorkingDirectory)/snyk-*-report.txt'
+
+  - stage: TerraformValidate
+    displayName: 'Multi-Cloud Terraform Validation'
+    dependsOn: SnykSecurityScan
+    condition: succeeded()
+    jobs:
+      - job: ValidateAzure
+        displayName: 'Validate Azure Infrastructure'
+        condition: or(eq('${{ parameters.cloudProvider }}', 'azure'), eq('${{ parameters.cloudProvider }}', 'both'))
+        timeoutInMinutes: 180
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Set Azure Working Directory'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if ("${{ parameters.deploymentType }}" -eq "platform") {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/azure/platform"
+                  Write-Host "Azure working directory set to: infrastructure/azure/platform"
+                } elseif ("${{ parameters.deploymentType }}" -eq "landing-zone") {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/azure/landing-zones"
+                  Write-Host "Azure working directory set to: infrastructure/azure/landing-zones"
+                } else {
+                  Write-Host "##vso[task.logissue type=error]Invalid deployment type for Azure: ${{ parameters.deploymentType }}"
+                  exit 1
+                }
+
+          - task: AzureCLI@2
+            displayName: 'Azure Terraform Init & Validate'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              addSpnToEnvironment: true
+              inlineScript: |                
+                Set-Location "$(workingDirectory)"
+                
+                # Set Terraform authentication using federated credentials
+                $env:ARM_CLIENT_ID = $env:servicePrincipalId
+                $env:ARM_TENANT_ID = $env:tenantId
+                $env:ARM_OIDC_TOKEN = $env:idToken
+                $env:ARM_USE_OIDC = "true"
+                
+                # Extract subscription ID from Azure vars file and set ARM_SUBSCRIPTION_ID
+                $azureVarsFile = "$(System.DefaultWorkingDirectory)/$(azureTfvarsFile)"
+                if (Test-Path $azureVarsFile) {
+                    $varsContent = Get-Content $azureVarsFile -Raw
+                    if ($varsContent -match 'global_platform_subscription_id\s*=\s*"([^"]+)"') {
+                        $subscriptionId = $matches[1]
+                        $env:ARM_SUBSCRIPTION_ID = $subscriptionId
+                        Write-Host "✅ Set ARM_SUBSCRIPTION_ID: $subscriptionId"
+                    } else {
+                        Write-Host "##vso[task.logissue type=error]Could not find global_platform_subscription_id in $azureVarsFile"
+                        exit 1
+                    }
+                } else {
+                    Write-Host "##vso[task.logissue type=error]Azure vars file not found: $azureVarsFile"
+                    exit 1
+                }
+                
+                Write-Host "🔧 Initializing Azure Terraform in $(workingDirectory)..."
+                Write-Host "Using federated credentials for Terraform authentication"
+                
+                # Initialize Terraform with local backend
+                terraform init
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "❌ Azure Terraform initialization failed"
+                  exit $LASTEXITCODE
+                }
+                Write-Host "✅ Azure Terraform initialized successfully"
+                
+                # Validate Terraform configuration
+                Write-Host "� Validating Azure Terraform configuration..."
+                terraform validate -no-color
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✅ Azure Terraform validation passed"
+                } else {
+                  Write-Host "❌ Azure Terraform validation failed"
+                  exit $LASTEXITCODE
+                }
+
+      - job: ValidateAWS
+        displayName: 'Validate AWS Infrastructure'
+        condition: or(eq('${{ parameters.cloudProvider }}', 'aws'), eq('${{ parameters.cloudProvider }}', 'both'))
+        timeoutInMinutes: 180
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Set AWS Working Directory'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if ("${{ parameters.deploymentType }}" -eq "platform") {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/aws/platform"
+                  Write-Host "AWS working directory set to: infrastructure/aws/platform"
+                } elseif ("${{ parameters.deploymentType }}" -eq "landing-zone") {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/aws/landing-zones"
+                  Write-Host "AWS working directory set to: infrastructure/aws/landing-zones"
+                } else {
+                  Write-Host "##vso[task.logissue type=error]Invalid deployment type for AWS: ${{ parameters.deploymentType }}"
+                  exit 1
+                }
+
+          - script: |
+              cd "$(workingDirectory)"
+              
+              echo "🔧 Initializing AWS Terraform in $(workingDirectory)..."
+              echo "Using AWS credentials for Terraform authentication"
+              
+              # Initialize Terraform with local backend for validation
+              terraform init -backend=false
+              if [ $? -ne 0 ]; then
+                echo "❌ AWS Terraform initialization failed"
+                exit 1
+              fi
+              echo "✅ AWS Terraform initialized successfully"
+              
+              # Validate Terraform configuration
+              echo "🔍 Validating AWS Terraform configuration..."
+              terraform validate -no-color
+              if [ $? -eq 0 ]; then
+                echo "✅ AWS Terraform validation passed"
+              else
+                echo "❌ AWS Terraform validation failed"
+                exit 1
+              fi
+            displayName: 'AWS Terraform Init & Validate'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_DEFAULT_REGION: 'us-east-1'
+
+      - job: ValidateCoordination
+        displayName: 'Validate Coordination Infrastructure'
+        condition: or(eq('${{ parameters.cloudProvider }}', 'coordination'), eq('${{ parameters.cloudProvider }}', 'both'))
+        timeoutInMinutes: 180
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Validate Coordination Infrastructure'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "🔧 Validating Coordination Infrastructure..."
+                
+                if (Test-Path "infrastructure/coordination") {
+                  Set-Location "infrastructure/coordination"
+                  
+                  # Initialize without backend for validation
+                  terraform init -backend=false
+                  if ($LASTEXITCODE -ne 0) {
+                    Write-Host "❌ Coordination Terraform initialization failed"
+                    exit $LASTEXITCODE
+                  }
+                  Write-Host "✅ Coordination Terraform initialized successfully"
+                  
+                  # Validate Terraform configuration
+                  Write-Host "🔍 Validating Coordination Terraform configuration..."
+                  terraform validate -no-color
+                  if ($LASTEXITCODE -eq 0) {
+                    Write-Host "✅ Coordination Terraform validation passed"
+                  } else {
+                    Write-Host "❌ Coordination Terraform validation failed"
+                    exit $LASTEXITCODE
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ Coordination directory not found, skipping coordination validation"
+                }
+                
+                if (Test-Path "infrastructure/shared") {
+                  Set-Location "infrastructure/shared"
+                  
+                  # Initialize without backend for validation
+                  terraform init -backend=false
+                  if ($LASTEXITCODE -ne 0) {
+                    Write-Host "❌ Shared Terraform initialization failed"
+                    exit $LASTEXITCODE
+                  }
+                  Write-Host "✅ Shared Terraform initialized successfully"
+                  
+                  # Validate Terraform configuration
+                  Write-Host "🔍 Validating Shared Terraform configuration..."
+                  terraform validate -no-color
+                  if ($LASTEXITCODE -eq 0) {
+                    Write-Host "✅ Shared Terraform validation passed"
+                  } else {
+                    Write-Host "❌ Shared Terraform validation failed"
+                    exit $LASTEXITCODE
+                  }
+                  
+                  Set-Location "$(System.DefaultWorkingDirectory)"
+                } else {
+                  Write-Host "⚠️ Shared directory not found, skipping shared validation"
+                }
+  - stage: TerraformPlan
+    displayName: 'Terraform Plan'
+    dependsOn: TerraformValidate
+    condition: succeeded()
+    jobs:      
+      - job: Plan
+        displayName: 'Generate Terraform Plan'
+        timeoutInMinutes: 180
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Set Working Directory'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if ("${{ parameters.deploymentType }}" -eq "platform") {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/platform"
+                  Write-Host "Working directory set to: infrastructure/platform"
+                } else {
+                  Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/file_new_lz"
+                  Write-Host "Working directory set to: infrastructure/file_new_lz"                }
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Init, Plan & Artifacts'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              addSpnToEnvironment: true
+              inlineScript: |
+                Set-Location "$(workingDirectory)"
+                
+                # Set Terraform authentication using federated credentials
+                $env:ARM_CLIENT_ID = $env:servicePrincipalId
+                $env:ARM_TENANT_ID = $env:tenantId
+                $env:ARM_OIDC_TOKEN = $env:idToken
+                $env:ARM_USE_OIDC = "true"
+                
+                Write-Host "🔧 Using federated credentials for Terraform authentication"
+                Write-Host "Client ID: $($env:ARM_CLIENT_ID)"
+                Write-Host "Tenant ID: $($env:ARM_TENANT_ID)"
+                
+                # Extract subscription ID from vars file and set ARM_SUBSCRIPTION_ID
+                $varsFile = "$(System.DefaultWorkingDirectory)/$(tfvarsFile)"
+                if (Test-Path $varsFile) {
+                    $varsContent = Get-Content $varsFile -Raw
+                    if ($varsContent -match 'global_platform_subscription_id\s*=\s*"([^"]+)"') {
+                        $subscriptionId = $matches[1]
+                        $env:ARM_SUBSCRIPTION_ID = $subscriptionId
+                        Write-Host "✅ Set ARM_SUBSCRIPTION_ID: $subscriptionId"
+                    } else {
+                        Write-Host "##vso[task.logissue type=error]Could not find global_platform_subscription_id in $varsFile"
+                        exit 1
+                    }
+                } else {
+                    Write-Host "##vso[task.logissue type=error]Vars file not found: $varsFile"
+                    exit 1
+                }
+                
+                # Initialize Terraform
+                Write-Host "🔧 Initializing Terraform with persistent local backend..."
+                
+                # Ensure state directory exists on self-hosted agent
+                $stateDir = if ("${{ parameters.deploymentType }}" -eq "platform") { "C:\agent\terraform-state\platform" } else { "C:\agent\terraform-state\landing-zone" }
+                if (-not (Test-Path $stateDir)) {
+                  New-Item -ItemType Directory -Path $stateDir -Force
+                  Write-Host "Created state directory: $stateDir"
+                }
+                
+                terraform init -backend-config="path=$stateDir\terraform.tfstate"
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "❌ Terraform initialization failed"
+                  exit $LASTEXITCODE
+                }
+                Write-Host "✅ Terraform initialized successfully"
+                
+                # Generate Terraform Plan
+                Write-Host "📋 Generating Terraform plan..."
+                Write-Host "Variables file: $(tfvarsFile)"
+                
+                # Verify variables file exists
+                $tfvarsPath = "$(System.DefaultWorkingDirectory)/$(tfvarsFile)"
+                Write-Host "Full variables file path: $tfvarsPath"
+                if (-not (Test-Path $tfvarsPath)) {
+                  Write-Host "❌ Variables file not found: $tfvarsPath"
+                  Write-Host "Available files in config directory:"
+                  Get-ChildItem "$(System.DefaultWorkingDirectory)/config" -Recurse | ForEach-Object { Write-Host "  $($_.FullName)" }
+                  exit 1
+                }
+                
+                # Run terraform plan and capture exit code
+                $ErrorActionPreference = 'Continue'
+                
+                # Prepare intent layer variables from pipeline parameters
+                $intentAzureFlag = if ('${{ parameters.enableAzureIntent }}' -eq 'true') { 'true' } else { 'false' }
+                $intentAwsFlag = if ('${{ parameters.enableAwsIntent }}' -eq 'true') { 'true' } else { 'false' }
+                $deployTestVmsFlag = if ('${{ parameters.deployTestVMs }}' -eq 'true') { 'true' } else { 'false' }
+                
+                Write-Host "🎯 Intent Layer Configuration:"
+                Write-Host "  Azure Intent Enabled: $intentAzureFlag"
+                Write-Host "  AWS Intent Enabled: $intentAwsFlag"
+                Write-Host "🧪 Test Infrastructure Configuration:"
+                Write-Host "  Deploy Test VMs (TiP): $deployTestVmsFlag"
+                
+                # Set up AWS environment variables to prevent credential validation errors
+                # When AWS intent is disabled, use dummy credentials to satisfy Terraform AWS provider initialization
+                if ($intentAwsFlag -eq 'false') {
+                  Write-Host "⚙️  Setting dummy AWS credentials for disabled AWS intent layer"
+                  $env:AWS_ACCESS_KEY_ID = "DUMMY_ACCESS_KEY"
+                  $env:AWS_SECRET_ACCESS_KEY = "DUMMY_SECRET_KEY"
+                  $env:AWS_DEFAULT_REGION = "us-east-1"
+                  $env:AWS_EC2_METADATA_DISABLED = "true"
+                }
+                
+                # Run terraform plan with intent layer variables
+                terraform plan -detailed-exitcode -no-color -out=tfplan -var-file="$tfvarsPath" `
+                  -var="intent_layer_deploy_azure_intent=$intentAzureFlag" `
+                  -var="intent_layer_deploy_aws_intent=$intentAwsFlag" `
+                  -var="deploy_test_vms=$deployTestVmsFlag" | Tee-Object -FilePath "plan-output.txt"
+                $planExitCode = $LASTEXITCODE
+                $ErrorActionPreference = 'Stop'
+                
+                # Set variable for downstream usage
+                Write-Host "##vso[task.setvariable variable=planExitCode;isOutput=true]$planExitCode"
+                  # Display plan results
+                if ($planExitCode -eq 0) {
+                  Write-Host "✅ No changes detected"
+                  exit 0
+                } elseif ($planExitCode -eq 2) {
+                  Write-Host "📋 Changes detected and plan generated"
+                  exit 0
+                } else {
+                  Write-Host "❌ Terraform plan failed"
+                  exit $planExitCode
+                }
+            name: 'terraformPlan'
+
+          - task: PowerShell@2
+            displayName: 'Show Terraform Plan'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Set-Location "$(workingDirectory)"
+                Write-Host "## 📋 Terraform Plan Output"
+                Write-Host "### Deployment Details:"
+                Write-Host "- **Environment**: ${{ parameters.environment }}"
+                Write-Host "- **Tenant**: ${{ parameters.tenant }}"
+                Write-Host "- **Deployment Type**: ${{ parameters.deploymentType }}"
+                Write-Host "- **Agent Pool**: ${{ parameters.agentPool }}"
+                Write-Host "- **Working Directory**: $(workingDirectory)"
+                Write-Host ""
+                Write-Host "### Plan Results:"
+                if (Test-Path "tfplan") {
+                  $planOutput = terraform show -no-color tfplan
+                  $planOutput | Select-Object -First 50 | ForEach-Object { Write-Host $_ }
+                  Write-Host ""
+                  Write-Host "*Plan truncated for readability. Full plan available in artifacts.*"
+                } else {
+                  Write-Host "No plan file generated"
+                }
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Terraform Plan'
+            inputs:
+              targetPath: '$(workingDirectory)/tfplan'
+              artifact: 'tfplan-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+              publishLocation: 'pipeline'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Plan Output'
+            inputs:
+              targetPath: '$(workingDirectory)/plan-output.txt'
+              artifact: 'plan-output-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+              publishLocation: 'pipeline'
+  - stage: TerraformApply
+    displayName: 'Terraform Apply'
+    dependsOn: TerraformPlan
+    condition: |
+      and(
+        succeeded(),
+        or(
+          and(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.Reason'], 'IndividualCI')),
+          eq('${{ parameters.action }}', 'apply')
+        )
+      )
+    jobs:
+      - deployment: Apply
+        displayName: 'Apply Terraform Changes'
+        timeoutInMinutes: 180
+        environment: '${{ parameters.environment }}'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: 'Checkout Repository'
+
+                - task: PowerShell@2
+                  displayName: 'Set Working Directory'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      if ("${{ parameters.deploymentType }}" -eq "platform") {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/platform"
+                        Write-Host "Working directory set to: infrastructure/platform"
+                      } else {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/file_new_lz"
+                        Write-Host "Working directory set to: infrastructure/file_new_lz"
+                      }
+
+                - task: AzureCLI@2
+                  displayName: 'Azure CLI Login'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'pscore'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      Write-Host "🔐 Authenticated with Azure CLI"                
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download Terraform Plan'
+                  inputs:
+                    buildType: 'current'
+                    artifactName: 'tfplan-${{ parameters.tenant }}-${{ parameters.deploymentType }}'                    
+                    targetPath: '$(workingDirectory)'
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Init & Apply'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'pscore'
+                    scriptLocation: 'inlineScript'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      Set-Location "$(workingDirectory)"
+                      
+                      # Set Terraform authentication using federated credentials
+                      $env:ARM_CLIENT_ID = $env:servicePrincipalId
+                      $env:ARM_TENANT_ID = $env:tenantId
+                      $env:ARM_OIDC_TOKEN = $env:idToken
+                      $env:ARM_USE_OIDC = "true"
+                      
+                      Write-Host "🔧 Using federated credentials for Terraform authentication"
+                      Write-Host "Client ID: $($env:ARM_CLIENT_ID)"
+                      Write-Host "Tenant ID: $($env:ARM_TENANT_ID)"
+                      
+                      # Extract subscription ID from vars file and set ARM_SUBSCRIPTION_ID
+                      $varsFile = "$(System.DefaultWorkingDirectory)/$(tfvarsFile)"
+                      if (Test-Path $varsFile) {
+                          $varsContent = Get-Content $varsFile -Raw
+                          if ($varsContent -match 'global_platform_subscription_id\s*=\s*"([^"]+)"') {
+                              $subscriptionId = $matches[1]
+                              $env:ARM_SUBSCRIPTION_ID = $subscriptionId
+                              Write-Host "✅ Set ARM_SUBSCRIPTION_ID: $subscriptionId"
+                          } else {
+                              Write-Host "##vso[task.logissue type=error]Could not find global_platform_subscription_id in $varsFile"
+                              exit 1
+                          }
+                      } else {
+                          Write-Host "##vso[task.logissue type=error]Vars file not found: $varsFile"
+                          exit 1
+                      }
+                      
+                      # Initialize Terraform  
+                      Write-Host "🔧 Initializing Terraform with persistent local backend..."
+                      
+                      # Ensure state directory exists on self-hosted agent
+                      $stateDir = if ("${{ parameters.deploymentType }}" -eq "platform") { "C:\agent\terraform-state\platform" } else { "C:\agent\terraform-state\landing-zone" }
+                      if (-not (Test-Path $stateDir)) {
+                        New-Item -ItemType Directory -Path $stateDir -Force
+                        Write-Host "Created state directory: $stateDir"
+                      }
+                      
+                      terraform init -backend-config="path=$stateDir\terraform.tfstate"
+                      if ($LASTEXITCODE -ne 0) {
+                        Write-Host "❌ Terraform initialization failed"
+                        exit $LASTEXITCODE
+                      }
+                      
+                      # Apply Terraform plan
+                      Write-Host "🚀 Applying Terraform changes..."
+                      
+                      # Set AWS environment variables to prevent credential validation errors during apply
+                      # Check if AWS intent should be disabled based on pipeline parameters
+                      $awsIntentEnabled = '${{ parameters.enableAwsIntent }}' -eq 'true'
+                      if (-not $awsIntentEnabled) {
+                        Write-Host "⚙️  Setting dummy AWS credentials for disabled AWS intent layer during apply"
+                        $env:AWS_ACCESS_KEY_ID = "DUMMY_ACCESS_KEY"
+                        $env:AWS_SECRET_ACCESS_KEY = "DUMMY_SECRET_KEY"
+                        $env:AWS_DEFAULT_REGION = "us-east-1"
+                        $env:AWS_EC2_METADATA_DISABLED = "true"
+                      }
+                      
+                      terraform apply -auto-approve tfplan
+                      if ($LASTEXITCODE -eq 0) {
+                        Write-Host "✅ Terraform apply completed successfully!"
+                      } else {
+                        Write-Host "❌ Terraform apply failed"
+                        exit $LASTEXITCODE
+                      }
+
+                - task: PowerShell@2
+                  displayName: 'Generate Portal Links'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "## 🎉 Deployment Completed Successfully!"
+                      Write-Host ""
+                      Write-Host "### 🌐 Azure Portal Quick Links:"
+                      Write-Host "- [Resource Groups](https://portal.azure.com/#view/HubsExtension/BrowseResourceGroups)"
+                      Write-Host "- [Management Groups](https://portal.azure.com/#view/Microsoft_Azure_ManagementGroups/ManagementGroupBrowseBlade)"
+                      Write-Host "- [Policy Assignments](https://portal.azure.com/#view/Microsoft_Azure_Policy/PolicyMenuBlade/~/Assignments)"
+                      Write-Host "- [Activity Log](https://portal.azure.com/#view/Microsoft_Azure_ActivityLog/ActivityLogBlade)"
+                      Write-Host ""
+                      Write-Host "### 📊 Deployment Summary:"
+                      Write-Host "- **Environment**: ${{ parameters.environment }}"
+                      Write-Host "- **Tenant**: ${{ parameters.tenant }}"
+                      Write-Host "- **Type**: ${{ parameters.deploymentType }}"
+                      Write-Host "- **Agent**: ${{ parameters.agentPool }}"
+                      Write-Host "- **Timestamp**: $(Get-Date)"
+  - stage: TerraformDestroy
+    displayName: 'Terraform Destroy'
+    dependsOn: TerraformPlan
+    condition: |
+      and(
+        succeeded(),
+        eq('${{ parameters.action }}', 'destroy')
+      )
+    jobs:
+      - deployment: Destroy
+        displayName: 'Destroy Infrastructure'
+        timeoutInMinutes: 180
+        environment: '${{ parameters.environment }}-destroy'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: 'Checkout Repository'
+
+                - task: PowerShell@2
+                  displayName: 'Set Working Directory'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      if ("${{ parameters.deploymentType }}" -eq "platform") {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/platform"
+                        Write-Host "Working directory set to: infrastructure/platform"
+                      } else {
+                        Write-Host "##vso[task.setvariable variable=workingDirectory]infrastructure/file_new_lz"
+                        Write-Host "Working directory set to: infrastructure/file_new_lz"
+                      }
+
+                - task: AzureCLI@2
+                  displayName: 'Azure CLI Login'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'pscore'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      Write-Host "🔐 Authenticated with Azure CLI"                  
+                - task: AzureCLI@2
+                  displayName: 'Terraform Init & Destroy'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'pscore'
+                    scriptLocation: 'inlineScript'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      Set-Location "$(workingDirectory)"
+                      
+                      # Set Terraform authentication using federated credentials
+                      $env:ARM_CLIENT_ID = $env:servicePrincipalId
+                      $env:ARM_TENANT_ID = $env:tenantId
+                      $env:ARM_OIDC_TOKEN = $env:idToken
+                      $env:ARM_USE_OIDC = "true"
+                      
+                      Write-Host "🔧 Using federated credentials for Terraform authentication"
+                      Write-Host "Client ID: $($env:ARM_CLIENT_ID)"
+                      Write-Host "Tenant ID: $($env:ARM_TENANT_ID)"
+                      
+                      # Extract subscription ID from vars file and set ARM_SUBSCRIPTION_ID
+                      $varsFile = "$(System.DefaultWorkingDirectory)/$(tfvarsFile)"
+                      if (Test-Path $varsFile) {
+                          $varsContent = Get-Content $varsFile -Raw
+                          if ($varsContent -match 'global_platform_subscription_id\s*=\s*"([^"]+)"') {
+                              $subscriptionId = $matches[1]
+                              $env:ARM_SUBSCRIPTION_ID = $subscriptionId
+                              Write-Host "✅ Set ARM_SUBSCRIPTION_ID: $subscriptionId"
+                          } else {
+                              Write-Host "##vso[task.logissue type=error]Could not find global_platform_subscription_id in $varsFile"
+                              exit 1
+                          }
+                      } else {
+                          Write-Host "##vso[task.logissue type=error]Vars file not found: $varsFile"
+                          exit 1
+                      }
+                      
+                      # Initialize Terraform
+                      Write-Host "🔧 Initializing Terraform with persistent local backend..."
+                      
+                      # Ensure state directory exists on self-hosted agent
+                      $stateDir = if ("${{ parameters.deploymentType }}" -eq "platform") { "C:\agent\terraform-state\platform" } else { "C:\agent\terraform-state\landing-zone" }
+                      if (-not (Test-Path $stateDir)) {
+                        New-Item -ItemType Directory -Path $stateDir -Force
+                        Write-Host "Created state directory: $stateDir"
+                      }
+                      
+                      terraform init -backend-config="path=$stateDir\terraform.tfstate"
+                      if ($LASTEXITCODE -ne 0) {
+                        Write-Host "❌ Terraform initialization failed"
+                        exit $LASTEXITCODE
+                      }
+                      
+                      # Destroy infrastructure
+                      Write-Host "⚠️ DESTROYING infrastructure for ${{ parameters.tenant }} - ${{ parameters.deploymentType }}"
+                      $tfvarsPath = "$(System.DefaultWorkingDirectory)/$(tfvarsFile)"
+                      Write-Host "Variables file path: $tfvarsPath"
+                      
+                      # Set deployment flags for destroy operation
+                      $intentAzureFlag = if ('${{ parameters.enableAzureIntent }}' -eq 'true') { 'true' } else { 'false' }
+                      $intentAwsFlag = if ('${{ parameters.enableAwsIntent }}' -eq 'true') { 'true' } else { 'false' }
+                      $deployTestVmsFlag = if ('${{ parameters.deployTestVMs }}' -eq 'true') { 'true' } else { 'false' }
+                      
+                      terraform destroy -auto-approve -var-file="$tfvarsPath" `
+                        -var="intent_layer_deploy_azure_intent=$intentAzureFlag" `
+                        -var="intent_layer_deploy_aws_intent=$intentAwsFlag" `
+                        -var="deploy_test_vms=$deployTestVmsFlag"
+                      if ($LASTEXITCODE -eq 0) {
+                        Write-Host "💥 Infrastructure destroyed successfully"
+                      } else {
+                        Write-Host "❌ Terraform destroy failed"
+                        exit $LASTEXITCODE
+                      }

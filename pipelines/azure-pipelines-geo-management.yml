@@ -1,0 +1,1066 @@
+# Azure DevOps Pipeline for Managing Geo Region Mappings
+# This pipeline allows you to add or remove geo regions and their associated Azure regions
+# Uses dynamic empty subscription detection like the Bicep pipeline
+
+trigger: none  # Manual trigger only
+
+parameters:
+- name: action
+  displayName: 'Action to Perform'
+  type: string
+  default: 'AddRegion'
+  values:
+  - 'AddRegion'
+  - 'RemoveRegion'
+
+- name: regionName
+  displayName: 'Azure Region (EMEA supports: northeurope, westeurope, uaenorth, uaesouth)'
+  type: string
+  default: 'westeurope'
+  values:
+  - 'northeurope'
+  - 'westeurope'
+  - 'uaenorth'
+  - 'uaesouth'
+
+- name: useEmptySubscriptions
+  displayName: 'Use empty subscriptions from tenant (auto-find empty subscriptions)'
+  type: boolean
+  default: true
+
+- name: geoPlatformSubscriptionId
+  displayName: 'Geo Platform Subscription ID (leave default when using empty subscriptions)'
+  type: string
+  default: '00000000-0000-0000-0000-000000000000'
+
+- name: regionSubscriptionId
+  displayName: 'Region Subscription ID (leave default when using empty subscriptions)'
+  type: string
+  default: '00000000-0000-0000-0000-000000000000'
+
+- name: environment
+  displayName: 'Environment'
+  type: string
+  default: 'dev'
+  values:
+  - 'dev'
+  - 'uat'
+  - 'prd'
+
+- name: tenantName
+  displayName: 'Tenant Configuration'
+  type: string
+  default: 'Tenant001'
+  values:
+  - 'Tenant001'
+  - 'Tenant002'
+
+variables:
+  - name: varsFilePath
+    value: 'config/${{ parameters.tenantName }}/vars.tfvars'
+
+pool:
+  name: 'selfhosted'
+
+stages:
+- stage: ValidateParameters
+  displayName: 'Validate Parameters'
+  jobs:
+  - job: Validate
+    displayName: 'Validate Input Parameters'
+    timeoutInMinutes: 180
+    steps:
+    - task: PowerShell@2
+      displayName: 'Validate Parameters'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]Validating parameters for action: ${{ parameters.action }}"
+          
+          # Validate action-specific requirements when NOT using empty subscriptions
+          if ('${{ parameters.useEmptySubscriptions }}' -eq 'false') {
+              switch ("${{ parameters.action }}") {
+                  "AddRegion" {
+                      $regionSubId = '${{ parameters.regionSubscriptionId }}'
+                      if ([string]::IsNullOrEmpty($regionSubId) -or $regionSubId -eq '00000000-0000-0000-0000-000000000000') {
+                          Write-Host "##vso[task.logissue type=error]Region Subscription ID is required for AddRegion action when not using empty subscriptions"
+                          Write-Host "##vso[task.complete result=Failed;]Pipeline failed due to missing required parameter"
+                          exit 1
+                      }
+                      Write-Host "✓ AddRegion validation passed"
+                  }
+                  "RemoveRegion" {
+                      if ([string]::IsNullOrEmpty("${{ parameters.regionName }}")) {
+                          Write-Host "##vso[task.logissue type=error]Region Name is required for RemoveRegion action"
+                          Write-Host "##vso[task.complete result=Failed;]Pipeline failed due to missing required parameter"
+                          exit 1
+                      }
+                      Write-Host "✓ RemoveRegion validation passed"
+                  }
+              }
+          } else {
+              Write-Host "✓ Using empty subscription auto-detection - manual subscription IDs not required"
+          }
+          
+          # Validate region is supported by EMEA
+          $validRegions = @('northeurope', 'westeurope', 'uaenorth', 'uaesouth')
+          
+          if ("${{ parameters.action }}" -in @('AddRegion', 'RemoveRegion')) {
+              if ("${{ parameters.regionName }}" -notin $validRegions) {
+                  Write-Host "##vso[task.logissue type=error]❌ Invalid region '${{ parameters.regionName }}'. EMEA supports: northeurope, westeurope, uaenorth, uaesouth"
+                  Write-Host "##vso[task.complete result=Failed;]Pipeline failed due to invalid region"
+                  exit 1
+              }
+              Write-Host "✓ Region validation passed: ${{ parameters.regionName }} is supported by EMEA"
+          }
+
+- stage: CheckExistingConfiguration
+  displayName: 'Check Existing Configuration'
+  dependsOn: ValidateParameters
+  condition: succeeded()
+  jobs:
+  - job: CheckConfiguration
+    displayName: 'Check for Existing Geo/Region Configuration'
+    timeoutInMinutes: 180
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+
+    - task: PowerShell@2
+      displayName: 'Check for Existing Configuration'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔍 Checking existing configuration in vars.tfvars..."
+          $varsFile = "$(varsFilePath)"
+          
+          if (-not (Test-Path $varsFile)) {
+              Write-Host "##vso[task.logissue type=error]Vars file not found: $varsFile"
+              Write-Host "##vso[task.complete result=Failed;]Pipeline failed - vars file not found"
+              exit 1
+          }
+          
+          $content = Get-Content $varsFile -Raw
+          Write-Host "Reading configuration from: $varsFile"
+          
+          # Check based on action
+          switch ('${{ parameters.action }}') {
+              'AddRegion' {
+                  # Check if EMEA geo exists
+                  if (-not ($content -match 'geo_name\s*=\s*"EMEA"')) {
+                      Write-Host "##vso[task.logissue type=error]❌ EMEA geo does not exist - cannot add region"
+                      Write-Host "##vso[task.complete result=Failed;]Pipeline failed - EMEA geo does not exist"
+                      exit 1
+                  }
+                  
+                  # Use a more robust approach to check if region already exists
+                  # Simply search for the region name pattern within the entire geo_region_mapping
+                  $regionExistsPattern = 'azure_region_name\s*=\s*"${{ parameters.regionName }}"'
+                  $geoMappingStart = $content.IndexOf('geo_region_mapping')
+                  $geoMappingEnd = $content.LastIndexOf(']', $content.Length - 1)
+                  
+                  if ($geoMappingStart -ge 0 -and $geoMappingEnd -gt $geoMappingStart) {
+                      $geoMappingSection = $content.Substring($geoMappingStart, $geoMappingEnd - $geoMappingStart + 1)
+                      
+                      if ($geoMappingSection -match $regionExistsPattern) {
+                          Write-Host "✅ Region '${{ parameters.regionName }}' already exists in EMEA configuration"
+                          Write-Host "##[section]Skipping geo management script and proceeding directly to Terraform plan/apply"
+                          Write-Host "##[section]This will ensure the infrastructure matches the current configuration"
+                          Write-Host "##vso[task.setvariable variable=regionAlreadyExists;isOutput=true]true"
+                          Write-Host "##vso[task.setvariable variable=runFindEmptySubscriptions;isOutput=true]false"
+                      } else {
+                          Write-Host "✅ Region '${{ parameters.regionName }}' does not exist in EMEA - safe to add"
+                          Write-Host "##vso[task.setvariable variable=regionAlreadyExists;isOutput=true]false"
+                          Write-Host "##vso[task.setvariable variable=runFindEmptySubscriptions;isOutput=true]true"
+                      }
+                  } else {
+                      Write-Host "##vso[task.logissue type=error]❌ Could not parse geo_region_mapping section"
+                      Write-Host "##vso[task.complete result=Failed;]Pipeline failed - could not parse configuration"
+                      exit 1
+                  }
+              }
+              'RemoveRegion' {
+                  # Check if EMEA geo exists
+                  if (-not ($content -match 'geo_name\s*=\s*"EMEA"')) {
+                      Write-Host "##vso[task.logissue type=error]❌ EMEA geo does not exist - cannot remove region"
+                      Write-Host "##vso[task.complete result=Failed;]Pipeline failed - EMEA geo does not exist"
+                      exit 1
+                  }
+                  
+                  # Use a more robust approach to check if region exists to remove
+                  $regionExistsPattern = 'azure_region_name\s*=\s*"${{ parameters.regionName }}"'
+                  $geoMappingStart = $content.IndexOf('geo_region_mapping')
+                  $geoMappingEnd = $content.LastIndexOf(']', $content.Length - 1)
+                  
+                  if ($geoMappingStart -ge 0 -and $geoMappingEnd -gt $geoMappingStart) {
+                      $geoMappingSection = $content.Substring($geoMappingStart, $geoMappingEnd - $geoMappingStart + 1)
+                      
+                      if (-not ($geoMappingSection -match $regionExistsPattern)) {
+                          Write-Host "##vso[task.logissue type=warning]⚠️  Region '${{ parameters.regionName }}' does not exist in EMEA - nothing to remove"
+                          Write-Host "##[section]Pipeline will continue but geo management script will have nothing to do"
+                          Write-Host "##vso[task.setvariable variable=regionAlreadyExists;isOutput=true]false"
+                          Write-Host "##vso[task.setvariable variable=runFindEmptySubscriptions;isOutput=true]false"
+                      } else {
+                          Write-Host "✅ Region '${{ parameters.regionName }}' exists in EMEA - safe to remove"
+                          Write-Host "##[section]Proceeding with region removal"
+                          Write-Host "##vso[task.setvariable variable=regionAlreadyExists;isOutput=true]true"
+                          Write-Host "##vso[task.setvariable variable=runFindEmptySubscriptions;isOutput=true]false"
+                          Write-Host "##[command]✅ IMPORTANT: Region exists - ExecuteGeoManagement WILL run to remove it"
+                      }
+                  } else {
+                      Write-Host "##vso[task.logissue type=error]❌ Could not parse geo_region_mapping section"
+                      Write-Host "##vso[task.complete result=Failed;]Pipeline failed - could not parse configuration"
+                      exit 1
+                  }
+              }
+          }
+          
+          Write-Host "##[section]Configuration check completed successfully"
+      name: checkConfig
+
+- stage: FindEmptySubscriptions
+  displayName: 'Find Empty Subscriptions'
+  dependsOn: 
+    - ValidateParameters
+    - CheckExistingConfiguration
+  condition: and(succeeded(), eq('${{ parameters.useEmptySubscriptions }}', true), eq('${{ parameters.action }}', 'AddRegion'))
+  jobs:
+  - job: FindSubscriptions
+    displayName: 'Find Available Empty Subscriptions'
+    timeoutInMinutes: 180
+    steps:
+    - task: PowerShell@2
+      displayName: 'Check if Region Search is Needed'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]Checking if we need to find empty subscriptions for AddRegion..."
+          
+          $varsFile = "$(varsFilePath)"
+          if (-not (Test-Path $varsFile)) {
+              Write-Host "##vso[task.logissue type=error]Vars file not found: $varsFile"
+              exit 1
+          }
+          
+          $content = Get-Content $varsFile -Raw
+          
+          # Check if region already exists
+          $regionExistsPattern = 'azure_region_name\s*=\s*"${{ parameters.regionName }}"'
+          $geoMappingStart = $content.IndexOf('geo_region_mapping')
+          $geoMappingEnd = $content.LastIndexOf(']', $content.Length - 1)
+          
+          if ($geoMappingStart -ge 0 -and $geoMappingEnd -gt $geoMappingStart) {
+              $geoMappingSection = $content.Substring($geoMappingStart, $geoMappingEnd - $geoMappingStart + 1)
+              
+              if ($geoMappingSection -match $regionExistsPattern) {
+                  Write-Host "##[section]Region '${{ parameters.regionName }}' already exists - skipping empty subscription search"
+                  Write-Host "##vso[task.complete result=Skipped;]Region already exists"
+                  exit 0
+              } else {
+                  Write-Host "##[section]✅ Region '${{ parameters.regionName }}' does not exist - proceeding to find empty subscriptions"
+              }
+          } else {
+              Write-Host "##vso[task.logissue type=error]Could not parse geo_region_mapping section"
+              exit 1
+          }
+
+    - task: AzurePowerShell@5
+      displayName: 'Discover Empty Subscriptions'
+      inputs:
+        azureSubscription: 'Adia_Deploy'  # Update with your service connection
+        ScriptType: 'InlineScript'
+        Inline: |
+          Write-Host "##[section]🔍 Finding empty subscriptions in tenant..."
+          
+          # First, get all subscriptions already used in vars.tfvars
+          Write-Host "##[section]Checking subscriptions already used in vars.tfvars..."
+          $varsFile = "$(varsFilePath)"
+          $usedSubscriptions = @()
+          
+          if (Test-Path $varsFile) {
+              $varsContent = Get-Content $varsFile -Raw
+              
+              # Extract all subscription IDs from the vars file using regex
+              $subscriptionPattern = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+              $matches = [regex]::Matches($varsContent, $subscriptionPattern)
+              
+              foreach ($match in $matches) {
+                  $subId = $match.Value
+                  if ($subId -notin $usedSubscriptions) {
+                      $usedSubscriptions += $subId
+                      Write-Host "Found subscription in vars.tfvars: $subId"
+                  }
+              }
+              
+              Write-Host "Total subscriptions already used in configuration: $($usedSubscriptions.Count)"
+              if ($usedSubscriptions.Count -gt 0) {
+                  Write-Host "Used subscriptions:"
+                  $usedSubscriptions | ForEach-Object { Write-Host "  - $_" }
+              }
+          } else {
+              Write-Host "##vso[task.logissue type=warning]Vars file not found at: $varsFile"
+          }
+          
+          # Get all subscriptions in the tenant
+          $allSubscriptions = Get-AzSubscription | Where-Object { $_.State -eq "Enabled" }
+          Write-Host "##[section]Found $($allSubscriptions.Count) enabled subscriptions in tenant"
+          
+          $emptySubscriptions = @()
+          
+          foreach ($subscription in $allSubscriptions) {
+              try {
+                  # Skip subscriptions already used in vars.tfvars
+                  if ($subscription.Id -in $usedSubscriptions) {
+                      Write-Host "Subscription: $($subscription.Name) ($($subscription.Id)) - SKIPPED (already used in vars.tfvars)"
+                      continue
+                  }
+                  
+                  Set-AzContext -SubscriptionId $subscription.Id -Force | Out-Null
+                  
+                  # Check for resource groups
+                  $resourceGroups = Get-AzResourceGroup -ErrorAction SilentlyContinue
+                  $resourceGroupCount = if ($resourceGroups) { $resourceGroups.Count } else { 0 }
+                  
+                  # Check for resources directly (some resources might not be in resource groups)
+                  $resources = Get-AzResource -ErrorAction SilentlyContinue
+                  $resourceCount = if ($resources) { $resources.Count } else { 0 }
+                  
+                  Write-Host "Subscription: $($subscription.Name) ($($subscription.Id))"
+                  Write-Host "  Resource Groups: $resourceGroupCount"
+                  Write-Host "  Resources: $resourceCount"
+                  
+                  # Consider subscription empty if it has no resources AND is not used in vars.tfvars
+                  if ($resourceCount -eq 0) {
+                      $emptySubscriptions += @{
+                          Id = $subscription.Id
+                          Name = $subscription.Name
+                          ResourceGroups = $resourceGroupCount
+                          Resources = $resourceCount
+                      }
+                      Write-Host "  ✅ Empty and unused subscription found"
+                  } else {
+                      Write-Host "  ❌ Subscription has resources"
+                  }
+              } catch {
+                  Write-Warning "Failed to check subscription $($subscription.Name): $($_.Exception.Message)"
+              }
+          }
+          
+          Write-Host "##[section]📊 Summary of available empty subscriptions:"
+          Write-Host "Total empty and unused subscriptions: $($emptySubscriptions.Count)"
+          
+          if ($emptySubscriptions.Count -gt 0) {
+              Write-Host "Available subscriptions:"
+              $emptySubscriptions | ForEach-Object { 
+                  Write-Host "  - $($_.Name) ($($_.Id)) - $($_.Resources) resources"
+              }
+          }
+          
+          # Determine how many subscriptions we need based on action
+          $requiredSubscriptions = switch ("${{ parameters.action }}") {
+              "AddRegion" { 1 } # Need 1 for region
+              default { 0 }
+          }
+          
+          if ($emptySubscriptions.Count -lt $requiredSubscriptions) {
+              Write-Host "##vso[task.logissue type=error]❌ Not enough empty and unused subscriptions found."
+              Write-Host "Required: $requiredSubscriptions"
+              Write-Host "Available: $($emptySubscriptions.Count)"
+              Write-Host "Note: Subscriptions already used in vars.tfvars are excluded to prevent conflicts"
+              Write-Host "##vso[task.complete result=Failed;]Pipeline failed due to insufficient empty subscriptions"
+              throw "Insufficient empty and unused subscriptions available"
+          }
+          
+          # Select subscriptions based on action
+          switch ("${{ parameters.action }}") {
+              "AddRegion" {
+                  $selectedRegionSub = $emptySubscriptions[0].Id
+                  Write-Host "✅ Selected region subscription:"
+                  Write-Host "- Region: $($emptySubscriptions[0].Name) ($selectedRegionSub)"
+                  Write-Host "- Verified: Empty (0 resources) and not used in current configuration"
+                  Write-Host "##vso[task.setvariable variable=selectedRegionSubscriptionId;isOutput=true]$selectedRegionSub"
+              }
+          }
+        azurePowerShellVersion: 'LatestVersion'
+        pwsh: true
+      name: findSubscriptions
+
+- stage: ShowCurrentConfiguration
+  displayName: 'Show Current Configuration'
+  dependsOn: 
+    - ValidateParameters
+    - CheckExistingConfiguration
+  condition: succeeded()
+  jobs:
+  - job: ShowConfig
+    displayName: 'Display Current Terraform Configuration'
+    timeoutInMinutes: 180
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+
+    - task: PowerShell@2
+      displayName: 'Show Current Configuration'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]=== Current geo_region_mapping configuration ==="
+          if (Test-Path "$(varsFilePath)") {
+              $content = Get-Content "$(varsFilePath)" -Raw
+              $startPattern = 'geo_region_mapping\s*=\s*\['
+              $match = [regex]::Match($content, $startPattern)
+              if ($match.Success) {
+                  $lines = $content.Split("`n")
+                  $inMapping = $false
+                  $bracketCount = 0
+                  
+                  for ($i = 0; $i -lt $lines.Length; $i++) {
+                      if ($lines[$i] -match 'geo_region_mapping\s*=\s*\[') {
+                          $inMapping = $true
+                          $bracketCount = 1
+                          Write-Host $lines[$i]
+                          continue
+                      }
+                      
+                      if ($inMapping) {
+                          foreach ($char in $lines[$i].ToCharArray()) {
+                              if ($char -eq '[') { $bracketCount++ }
+                              elseif ($char -eq ']') { $bracketCount-- }
+                          }
+                          Write-Host $lines[$i]
+                          if ($bracketCount -eq 0) { break }
+                      }
+                  }
+              }
+          } else {
+              Write-Warning "Vars file not found: $(varsFilePath)"
+          }
+
+- stage: ExecuteGeoManagement
+  displayName: 'Execute Geo Region Management'
+  dependsOn: 
+    - ShowCurrentConfiguration
+    - CheckExistingConfiguration
+    - FindEmptySubscriptions  # Add dependency for subscription ID access
+  condition: |
+    and(
+      in(dependencies.ShowCurrentConfiguration.result, 'Succeeded'),
+      in(dependencies.CheckExistingConfiguration.result, 'Succeeded'),
+      in(dependencies.FindEmptySubscriptions.result, 'Succeeded', 'Skipped')
+    )
+  variables:
+    # Get subscription IDs from previous stage if using empty subscriptions (only for AddRegion)
+    selectedRegionSubscriptionId: $[ stageDependencies.FindEmptySubscriptions.FindSubscriptions.outputs['findSubscriptions.selectedRegionSubscriptionId'] ]
+  jobs:
+  - job: ExecuteManagement
+    displayName: 'Execute Geo Region Management Script'
+    timeoutInMinutes: 180
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      persistCredentials: true
+
+    - task: PowerShell@2
+      displayName: 'Debug Variable Passing'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔍 Debugging Variable Passing Between Stages"
+          Write-Host "Pipeline variable selectedRegionSubscriptionId: '$(selectedRegionSubscriptionId)'"
+          Write-Host "Environment variable SELECTEDREGIONSUBSCRIPTIONID: '$env:SELECTEDREGIONSUBSCRIPTIONID'"
+          Write-Host "Variable type check:"
+          Write-Host "  - Is null or empty: $([string]::IsNullOrEmpty('$(selectedRegionSubscriptionId)'))"
+          Write-Host "  - Length: $('$(selectedRegionSubscriptionId)'.Length)"
+          Write-Host "  - First 10 chars: '$('$(selectedRegionSubscriptionId)'.Substring(0, [Math]::Min(10, '$(selectedRegionSubscriptionId)'.Length)))'"
+          
+          # Test different ways to access the variable
+          $var1 = '$(selectedRegionSubscriptionId)'
+          $var2 = $env:SELECTEDREGIONSUBSCRIPTIONID
+          
+          Write-Host "Method 1 (direct): '$var1'"
+          Write-Host "Method 2 (env var): '$var2'"
+          
+          if ($var1 -eq $var2) {
+              Write-Host "✅ Both methods return the same value"
+          } else {
+              Write-Host "❌ Methods return different values!"
+          }
+      env:
+        SELECTEDREGIONSUBSCRIPTIONID: $(selectedRegionSubscriptionId)
+
+    - task: PowerShell@2
+      displayName: 'Execute Geo Region Management Script'
+      env:
+        SELECTEDREGIONSUBSCRIPTIONID: $(selectedRegionSubscriptionId)
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Build script parameters
+          $scriptParams = @{
+              'Action' = '${{ parameters.action }}'
+              'VarsFilePath' = '$(varsFilePath)'
+              'GeoName' = 'EMEA'
+              'Environment' = '${{ parameters.environment }}'
+          }
+          
+          # Add optional parameters
+          if ('${{ parameters.regionName }}' -ne '') {
+              $scriptParams['RegionName'] = '${{ parameters.regionName }}'
+          }
+          
+          # Handle subscription IDs based on whether we're using empty subscriptions
+          if ('${{ parameters.useEmptySubscriptions }}' -eq 'true') {
+              Write-Host "##[section]Using dynamically discovered empty subscriptions"
+              switch ('${{ parameters.action }}') {
+                  'AddRegion' {
+                      # Use environment variable instead of pipeline variable for better substitution
+                      $subId = $env:SELECTEDREGIONSUBSCRIPTIONID
+                      if (-not $subId) {
+                          # Fallback to direct variable access
+                          $subId = '$(selectedRegionSubscriptionId)'
+                      }
+                      
+                      Write-Host "Debug: selectedRegionSubscriptionId from env: '$env:SELECTEDREGIONSUBSCRIPTIONID'"
+                      Write-Host "Debug: selectedRegionSubscriptionId from variable: '$(selectedRegionSubscriptionId)'"
+                      Write-Host "Debug: Final subId value: '$subId'"
+                      Write-Host "Debug: Length = $($subId.Length)"
+                      
+                      # Simplified validation - check if it's not empty and looks like a GUID
+                      $isValidGuid = $false
+                      try {
+                          # Try to parse as GUID
+                          [System.Guid]::Parse($subId) | Out-Null
+                          $isValidGuid = $true
+                          Write-Host "Debug: ✅ GUID parsing successful"
+                      } catch {
+                          Write-Host "Debug: ❌ GUID parsing failed: $($_.Exception.Message)"
+                      }
+                      
+                      # Check if it's a valid GUID and not empty
+                      if ($subId -and $subId.Length -eq 36 -and $isValidGuid) {
+                          $scriptParams['RegionSubscriptionId'] = $subId
+                          Write-Host "✅ Using discovered region subscription: $subId"
+                      } else {
+                          Write-Host "##vso[task.logissue type=error]❌ No valid region subscription ID available from discovery"
+                          Write-Host "##vso[task.logissue type=error]Validation results:"
+                          Write-Host "##vso[task.logissue type=error]  - Not empty: $($subId -and $subId -ne '')"
+                          Write-Host "##vso[task.logissue type=error]  - Correct length (36): $($subId.Length -eq 36)"
+                          Write-Host "##vso[task.logissue type=error]  - Valid GUID format: $isValidGuid"
+                          Write-Host "##vso[task.logissue type=error]selectedRegionSubscriptionId = '$subId'"
+                          Write-Host "##vso[task.complete result=Failed;]Pipeline failed - missing or invalid subscription ID"
+                          throw "Cannot proceed with AddRegion without a valid subscription ID"
+                      }
+                  }
+              }
+          } else {
+              Write-Host "##[section]Using manually provided subscription IDs"
+              if ('${{ parameters.regionSubscriptionId }}' -ne '' -and '${{ parameters.regionSubscriptionId }}' -ne '00000000-0000-0000-0000-000000000000') {
+                  $scriptParams['RegionSubscriptionId'] = '${{ parameters.regionSubscriptionId }}'
+                  Write-Host "Using provided region subscription: ${{ parameters.regionSubscriptionId }}"
+              }
+          }
+          
+          # Display parameters
+          Write-Host "##[section]Script parameters:"
+          $scriptParams.GetEnumerator() | Sort-Object Key | ForEach-Object {
+              Write-Host "  $($_.Key): $($_.Value)"
+          }
+          
+          # Execute the script
+          Write-Host "##[section]Executing Manage-GeoRegionMapping.ps1..."
+          try {
+              & "$(System.DefaultWorkingDirectory)/utilities/Manage-GeoRegionMapping.ps1" @scriptParams
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Script exited with code $LASTEXITCODE"
+              }
+              Write-Host "##[command]✅ Script executed successfully"
+          } catch {
+              Write-Host "##vso[task.logissue type=error]Script execution failed: $($_.Exception.Message)"
+              throw
+          }
+        errorActionPreference: 'Stop'
+      name: executeScript
+
+    - task: PowerShell@2
+      displayName: 'Show Updated Configuration'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]=== Updated geo_region_mapping configuration ==="
+          if (Test-Path "$(varsFilePath)") {
+              $content = Get-Content "$(varsFilePath)" -Raw
+              $startPattern = 'geo_region_mapping\s*=\s*\['
+              $match = [regex]::Match($content, $startPattern)
+              if ($match.Success) {
+                  $lines = $content.Split("`n")
+                  $inMapping = $false
+                  $bracketCount = 0
+                  
+                  for ($i = 0; $i -lt $lines.Length; $i++) {
+                      if ($lines[$i] -match 'geo_region_mapping\s*=\s*\[') {
+                          $inMapping = $true
+                          $bracketCount = 1
+                          Write-Host $lines[$i]
+                          continue
+                      }
+                      
+                      if ($inMapping) {
+                          foreach ($char in $lines[$i].ToCharArray()) {
+                              if ($char -eq '[') { $bracketCount++ }
+                              elseif ($char -eq ']') { $bracketCount-- }
+                          }
+                          Write-Host $lines[$i]
+                          if ($bracketCount -eq 0) { break }
+                      }
+                  }
+              }
+          }
+
+    - task: PowerShell@2
+      displayName: 'Commit Changes to Repository'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Configure git
+          git config --global user.email "pipeline@azuredevops.com"
+          git config --global user.name "Azure DevOps Pipeline"
+          
+          Write-Host "##[section]Current git status before checkout fix:"
+          git status
+          git branch -a
+          
+          # Fix detached HEAD issue
+          $branchName = "$(Build.SourceBranchName)"
+          Write-Host "##[section]Switching to branch: $branchName"
+          
+          # Check if we're in detached HEAD and fix it
+          $currentBranch = git rev-parse --abbrev-ref HEAD
+          if ($currentBranch -eq "HEAD") {
+              Write-Host "In detached HEAD state, creating and switching to branch"
+              git checkout -b $branchName
+          } else {
+              Write-Host "Already on branch: $currentBranch"
+          }
+          
+          Write-Host "##[section]Git status after branch fix:"
+          git status
+          
+          # Always force add the vars file since it should have been modified by the script
+          $varsFile = "$(varsFilePath)"
+          if (Test-Path $varsFile) {
+              Write-Host "##[section]Force adding vars file: $varsFile"
+              Write-Host "File last modified: $((Get-Item $varsFile).LastWriteTime)"
+              
+              # Show the current content of the file to verify it was modified
+              Write-Host "##[section]Current vars file content (first 20 lines):"
+              Get-Content $varsFile -Head 20 | ForEach-Object { Write-Host "  $_" }
+              
+              # Force add the file
+              git add $varsFile --force
+              
+              # Check if there are now changes to commit
+              $hasChanges = git status --porcelain
+              if ($hasChanges) {
+                  Write-Host "##[section]Changes detected after force add:"
+                  git status --porcelain
+                  
+                  # Show diff before committing
+                  Write-Host "##[section]Changes to be committed:"
+                  git diff --cached
+                  
+                  # Commit with descriptive message
+                  $commitMessage = "Pipeline: ${{ parameters.action }} - EMEA"
+                  if ("${{ parameters.regionName }}" -ne "") {
+                      $commitMessage += " - Region: ${{ parameters.regionName }}"
+                  }
+                  
+                  Write-Host "##[section]Committing with message: $commitMessage"
+                  git commit -m "$commitMessage"
+                  
+                  if ($LASTEXITCODE -ne 0) {
+                      Write-Host "##vso[task.logissue type=error]Git commit failed"
+                      exit 1
+                  }
+                  
+                  # Push changes
+                  Write-Host "##[section]Pushing changes to origin/$branchName"
+                  git push origin HEAD:$branchName
+                  
+                  if ($LASTEXITCODE -ne 0) {
+                      Write-Host "##vso[task.logissue type=error]Git push failed"
+                      exit 1
+                  }
+                  
+                  Write-Host "##[command]✓ Changes committed and pushed to repository"
+              } else {
+                  Write-Host "##vso[task.logissue type=warning]No changes detected even after force add - script may not have modified the file"
+                  Write-Host "##[section]This likely means the script didn't make any changes or the requested operation had no effect"
+                  exit 0
+              }
+          } else {
+              Write-Host "##vso[task.logissue type=error]Vars file not found at: $varsFile"
+              exit 1
+          }
+      name: commitChanges
+
+- stage: ApprovalGate
+  displayName: 'Manual Approval for Terraform Apply'
+  dependsOn: ExecuteGeoManagement
+  condition: |
+    and(
+      or(
+        eq(dependencies.ExecuteGeoManagement.result, 'Succeeded'),
+        eq(dependencies.ExecuteGeoManagement.result, 'SucceededWithIssues')
+      ),
+      in('${{ parameters.action }}', 'AddRegion', 'RemoveRegion')
+    )
+  jobs:
+  - job: waitForValidation
+    displayName: 'Wait for Manual Approval'
+    pool: server
+    timeoutInMinutes: 1440 # 24 hours timeout
+    steps:
+    - task: ManualValidation@0
+      displayName: 'Manual Approval Required'
+      timeoutInMinutes: 1440
+      inputs:
+        notifyUsers: '$(Build.RequestedForEmail)'
+        instructions: |
+          🚨 TERRAFORM APPLY APPROVAL REQUIRED 🚨
+          
+          Action: ${{ parameters.action }}
+          Region: ${{ parameters.regionName }}
+          Environment: ${{ parameters.environment }}
+          Tenant: ${{ parameters.tenantName }}
+          
+          Please review the Terraform Plan output and approve to proceed with Apply.
+          
+          📋 Review Steps:
+          1. Check the Terraform Plan artifacts and logs from the previous stage
+          2. Verify the changes are as expected for ${{ parameters.action }}
+          3. Ensure no unintended destructive changes
+          
+          ✅ Click "Resume" to approve and proceed with Terraform Apply
+          ❌ Click "Reject" to stop the pipeline
+
+- stage: TerraformApply
+  displayName: 'Terraform Apply (Post-Approval)'
+  dependsOn: ApprovalGate
+  condition: |
+    and(
+      eq(dependencies.ApprovalGate.result, 'Succeeded'),
+      ne(dependencies.ApprovalGate.result, 'Canceled'),
+      ne(dependencies.ApprovalGate.result, 'Failed')
+    )
+  jobs:
+  - deployment: TerraformApply
+    displayName: 'Terraform Apply (Manual Approval Required)'
+    timeoutInMinutes: 180
+    environment: 'terraform-apply-approval'
+    pool:
+      name: 'selfhosted'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: PowerShell@2
+            displayName: 'Pre-Apply Confirmation'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "##[section]✅ MANUAL APPROVAL RECEIVED"
+                Write-Host "##[section]Proceeding with Terraform Apply after approval..."
+          
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: AzureCLI@2
+            displayName: 'Azure Authentication'
+            inputs:
+              azureSubscription: 'Adia_Deploy'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                Write-Host "##[section]Setting up Azure authentication for Terraform..."
+                Write-Host "✓ Authenticated with Azure using service connection"
+                az account show
+
+          - task: PowerShell@2
+            displayName: 'Setup Terraform'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "##[section]Setting up Terraform for local agent..."
+                
+                # First, check if terraform is already available in PATH
+                $terraformPath = Get-Command terraform -ErrorAction SilentlyContinue
+                if ($terraformPath) {
+                    Write-Host "✓ Terraform found in PATH: $($terraformPath.Source)"
+                    terraform version
+                    return
+                }
+                
+                Write-Host "Terraform not found in PATH, attempting installation..."
+                
+                # Check common installation locations
+                $commonPaths = @(
+                    "${env:ProgramFiles}\Terraform",
+                    "${env:ProgramFiles(x86)}\Terraform", 
+                    "${env:LOCALAPPDATA}\Programs\Terraform",
+                    "${env:USERPROFILE}\.terraform.d",
+                    "C:\terraform",
+                    "${env:CHOCOLATEYINSTALL}\bin"
+                )
+                
+                foreach ($path in $commonPaths) {
+                    $terraformExe = Join-Path $path "terraform.exe"
+                    if (Test-Path $terraformExe) {
+                        Write-Host "✓ Found Terraform at: $terraformExe"
+                        $env:PATH = "$path;$env:PATH"
+                        Write-Host "##vso[task.setvariable variable=PATH]$path;$env:PATH"
+                        terraform version
+                        return
+                    }
+                }
+                
+                # If not found, download and install Terraform
+                Write-Host "Downloading Terraform..."
+                $terraformVersion = "1.5.7"
+                $url = "https://releases.hashicorp.com/terraform/${terraformVersion}/terraform_${terraformVersion}_windows_amd64.zip"
+                
+                try {
+                    Invoke-WebRequest -Uri $url -OutFile "terraform.zip" -UseBasicParsing
+                    Expand-Archive "terraform.zip" -DestinationPath "." -Force
+                    
+                    # Add to PATH for current session
+                    $currentDir = (Get-Location).Path
+                    $env:PATH = "$currentDir;$env:PATH"
+                    
+                    # Set pipeline variable for subsequent tasks
+                    Write-Host "##vso[task.setvariable variable=PATH]$currentDir;$env:PATH"
+                    
+                    Write-Host "✓ Terraform downloaded and installed"
+                    terraform version
+                } catch {
+                    Write-Host "##vso[task.logissue type=error]Failed to download/install Terraform: $($_.Exception.Message)"
+                    Write-Host "##[error]Please ensure Terraform is installed on your local agent or available in PATH"
+                    exit 1
+                }
+
+          - task: PowerShell@2
+            displayName: 'Setup Terraform State Directory'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "##[section]Setting up Terraform state directory..."
+
+                $stateDir = "C:\agent\terraform-state\platform"
+                if (-not (Test-Path $stateDir)) {
+                    Write-Host "Creating state directory: $stateDir"
+                    New-Item -Path $stateDir -ItemType Directory -Force
+                    # Test write permissions immediately
+                    $testFile = "$stateDir\write-test.tmp"
+                    try {
+                        "test" | Out-File -FilePath $testFile -Force
+                        Remove-Item $testFile -Force
+                        Write-Host "✓ Directory created and is writable"
+                    } catch {
+                        Write-Host "##vso[task.logissue type=error]❌ Created directory but it's not writable: $($_.Exception.Message)"
+                        exit 1
+                    }
+                } else {
+                    Write-Host "State directory already exists: $stateDir"
+                }
+
+                # Check if state file exists
+                $stateFile = "$stateDir\terraform.tfstate"
+                if (Test-Path $stateFile) {
+                    Write-Host "✓ Existing state file found: $stateFile"
+                    Write-Host "State file size: $((Get-Item $stateFile).Length) bytes"
+                    Write-Host "State file modified: $((Get-Item $stateFile).LastWriteTime)"
+                } else {
+                    Write-Host "No existing state file found - this will be a fresh deployment"
+                }
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Init'
+            inputs:
+              azureSubscription: 'Adia_Deploy'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              workingDirectory: 'infrastructure/platform'
+              addSpnToEnvironment: true
+              inlineScript: |
+                Write-Host "##[section]Setting Azure CLI context and initializing Terraform for apply..."
+
+                # Extract subscription ID from vars file
+                $varsFile = "../../$(varsFilePath)"
+                if (Test-Path $varsFile) {
+                    $varsContent = Get-Content $varsFile -Raw
+                    if ($varsContent -match 'global_platform_subscription_id\s*=\s*"([^"]+)"') {
+                        $subscriptionId = $matches[1]
+                        Write-Host "Found subscription ID in vars file: $subscriptionId"
+                    } else {
+                        Write-Host "##vso[task.logissue type=error]Could not find global_platform_subscription_id in $varsFile"
+                        exit 1
+                    }
+                } else {
+                    Write-Host "##vso[task.logissue type=error]Vars file not found: $varsFile"
+                    exit 1
+                }
+
+                # Set the subscription context for Azure CLI
+                az account set --subscription "$subscriptionId"
+
+                # Verify the subscription is set correctly
+                $currentSub = az account show --query "id" -o tsv
+                Write-Host "##[command]Current Azure CLI subscription: $currentSub"
+
+                # Create and set up state directory
+                $stateDir = "C:\agent\terraform-state\platform"
+                if (-not (Test-Path $stateDir)) {
+                    New-Item -ItemType Directory -Path $stateDir -Force
+                    Write-Host "##[command]Created state directory: $stateDir"
+                }
+
+                terraform init -backend-config="path=$stateDir\terraform.tfstate" -var-file="../../$(varsFilePath)"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "##vso[task.logissue type=error]✗ Terraform init failed"
+                    exit 1
+                }
+                Write-Host "##[command]✓ Terraform init successful"
+
+          # Removed terraform-state download - using local backend instead
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Apply'
+            inputs:
+              azureSubscription: 'Adia_Deploy'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              workingDirectory: 'infrastructure/platform'
+              addSpnToEnvironment: true
+              inlineScript: |
+                Write-Host "##[section]Applying Terraform changes with local backend..."
+                
+                # Extract subscription ID from vars file
+                $varsFile = "../../$(varsFilePath)"
+                if (Test-Path $varsFile) {
+                    $varsContent = Get-Content $varsFile -Raw
+                    if ($varsContent -match 'global_platform_subscription_id\s*=\s*"([^"]+)"') {
+                        $subscriptionId = $matches[1]
+                        Write-Host "Found subscription ID in vars file: $subscriptionId"
+                    } else {
+                        Write-Host "##vso[task.logissue type=error]Could not find global_platform_subscription_id in $varsFile"
+                        exit 1
+                    }
+                } else {
+                    Write-Host "##vso[task.logissue type=error]Vars file not found: $varsFile"
+                    exit 1
+                }
+                
+                # Set the subscription context for Azure CLI
+                az account set --subscription "$subscriptionId"
+                
+                # Create and set up state directory
+                $stateDir = "C:\agent\terraform-state\platform"
+                if (-not (Test-Path $stateDir)) {
+                    New-Item -ItemType Directory -Path $stateDir -Force
+                    Write-Host "##[command]Created state directory: $stateDir"
+                }
+                
+                # Initialize Terraform (this uses the local backend configured in terraform.tf)
+                Write-Host "##[section]Initializing Terraform with consistent provider versions..."
+                terraform init -backend-config="path=$stateDir\terraform.tfstate" -upgrade -var-file="../../$(varsFilePath)"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "##vso[task.logissue type=error]✗ Terraform init failed"
+                    exit 1
+                }
+                
+                # Generate a fresh plan to avoid provider version conflicts
+                Write-Host "##[section]Generating fresh plan to avoid version conflicts..."
+                terraform plan -out=tfplan-fresh -var-file="../../$(varsFilePath)"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "##vso[task.logissue type=error]✗ Terraform plan failed"
+                    exit 1
+                }
+                
+                # Apply the fresh plan
+                Write-Host "##[section]Applying fresh plan..."
+                terraform apply -auto-approve tfplan-fresh
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "##vso[task.logissue type=error]✗ Terraform apply failed"
+                    exit 1
+                }
+                Write-Host "##[command]✓ Terraform apply completed successfully"
+
+- stage: Summary
+  displayName: 'Pipeline Summary'
+  dependsOn: 
+    - ValidateParameters
+    - CheckExistingConfiguration
+    - FindEmptySubscriptions
+    - ShowCurrentConfiguration
+    - ExecuteGeoManagement
+    - ApprovalGate
+    - TerraformApply
+  condition: |
+    always()
+  jobs:
+  - job: GenerateSummary
+    displayName: 'Generate Pipeline Summary'
+    timeoutInMinutes: 180
+    steps:
+    - task: PowerShell@2
+      displayName: 'Pipeline Summary'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]Geo Region Management Pipeline Summary"
+          Write-Host "================================================"
+          Write-Host "Action: ${{ parameters.action }}"
+          Write-Host "Geo: EMEA"
+          Write-Host "Region: ${{ parameters.regionName }}"
+          Write-Host "Use Empty Subscriptions: ${{ parameters.useEmptySubscriptions }}"
+          Write-Host "Tenant: ${{ parameters.tenantName }}"
+          Write-Host "Environment: ${{ parameters.environment }}"
+          Write-Host ""
+          
+          # Determine overall status
+          $overallStatus = "✅ Success"
+          
+          # Check stage results using environment variables
+          if ($env:SYSTEM_STAGEDISPLAYNAME -and $env:AGENT_JOBSTATUS) {
+              Write-Host "Current stage: $env:SYSTEM_STAGEDISPLAYNAME"
+              Write-Host "Job status: $env:AGENT_JOBSTATUS"
+              
+              if ($env:AGENT_JOBSTATUS -eq "Failed") {
+                  $overallStatus = "❌ Failed"
+              }
+          }
+          
+          Write-Host "##[section]Overall Status: $overallStatus"
+          Write-Host "Completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          
+          # Create summary for Azure DevOps
+          if ($env:AGENT_TEMPDIRECTORY) {
+              $summaryFile = Join-Path $env:AGENT_TEMPDIRECTORY "summary.md"
+              $summaryContent = "# Geo Region Management Summary`n`n" +
+                  "| Parameter | Value |`n" +
+                  "|-----------|-------|`n" +
+                  "| Status | $overallStatus |`n" +
+                  "| Action | ${{ parameters.action }} |`n" +
+                  "| Geo | EMEA |`n" +
+                  "| Region | ${{ parameters.regionName }} |`n" +
+                  "| Use Empty Subscriptions | ${{ parameters.useEmptySubscriptions }} |`n" +
+                  "| Tenant | ${{ parameters.tenantName }} |`n" +
+                  "| Environment | ${{ parameters.environment }} |`n" +
+                  "| Completed | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') |`n`n" +
+                  "## Build Information`n" +
+                  "- Build: [$(Build.BuildNumber)]($(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId))`n" +
+                  "- Branch: $(Build.SourceBranchName)`n" +
+                  "- Commit: $(Build.SourceVersion)`n"
+              
+              $summaryContent | Out-File -FilePath $summaryFile -Encoding UTF8
+              Write-Host "##vso[task.uploadsummary]$summaryFile"
+          }

@@ -1,0 +1,801 @@
+# EA Subscription Creation Pipeline Template
+# This template creates Azure subscriptions using EA billing details with built-in safeguards
+# to prevent duplicate creation and ensure subscription count limits are respected
+
+parameters:
+- name: maxSubscriptions
+  displayName: 'Maximum Number of Subscriptions to Create'
+  type: number
+  default: 1
+  
+- name: eaBillingAccountName
+  displayName: 'EA Billing Account Name'
+  type: string
+  
+- name: eaEnrollmentAccountName
+  displayName: 'EA Enrollment Account Name'
+  type: string
+
+- name: dryRun
+  displayName: 'Dry Run (Plan Only - No Subscription Creation)'
+  type: boolean
+  default: true
+
+- name: forceCreate
+  displayName: 'Force Create (Override Subscription Count Check)'
+  type: boolean
+  default: false
+
+- name: runApply
+  displayName: 'Run Apply Stage (Internal Parameter - Set by Pipeline)'
+  type: boolean
+  default: true
+
+variables:
+  - name: terraformWorkingDirectory
+    value: 'infrastructure/azure/landing-zones'
+  - group: Vaxowave
+  # PR and trigger detection variables
+  - name: isPR
+    value: $[eq(variables['Build.Reason'], 'PullRequest')]
+  - name: isPRMerged
+    value: $[and(eq(variables['Build.Reason'], 'IndividualCI'), contains(variables['Build.SourceVersionMessage'], 'Merged PR'))]
+  - name: shouldRunPlanOnly
+    value: $[and(eq(variables.isPR, true), eq(variables.isPRMerged, false))]
+  - name: shouldRunPlanAndApply
+    value: $[or(eq(variables.isPRMerged, true), and(ne(variables['Build.Reason'], 'PullRequest'), ne(variables.isPRMerged, true)))]
+
+stages:
+- stage: ValidateEADetails
+  displayName: 'Validate EA Configuration'
+  jobs:
+  - job: ValidateEA
+    displayName: 'Validate EA Billing Details'
+    timeoutInMinutes: 30
+    steps:
+    - task: AzurePowerShell@5
+      displayName: 'Validate EA Account Access'
+      inputs:
+        azureSubscription: 'Adia_Deploy'
+        ScriptType: 'InlineScript'
+        Inline: |
+          Write-Host "##[section]🔍 Validating EA billing account access..."
+          
+          try {
+              # Check if we can access the EA billing account
+              $billingAccount = Get-AzBillingAccount -Name "${{ parameters.eaBillingAccountName }}" -ErrorAction SilentlyContinue
+              
+              if (-not $billingAccount) {
+                  Write-Host "##vso[task.logissue type=error]❌ EA Billing Account '${{ parameters.eaBillingAccountName }}' not found or not accessible"
+                  Write-Host "##vso[task.logissue type=error]Please verify:"
+                  Write-Host "##vso[task.logissue type=error]  - EA billing account name is correct"
+                  Write-Host "##vso[task.logissue type=error]  - Service principal has EA account reader permissions"
+                  Write-Host "##vso[task.logissue type=error]  - EA agreement is active"
+                  throw "EA Billing Account validation failed"
+              }
+              
+              Write-Host "✅ EA Billing Account found: $($billingAccount.DisplayName)"
+              Write-Host "Account Type: $($billingAccount.AccountType)"
+              Write-Host "Agreement Type: $($billingAccount.AgreementType)"
+              
+              # Check enrollment account
+              $enrollmentAccounts = Get-AzEnrollmentAccount -ObjectId "${{ parameters.eaEnrollmentAccountName }}" -ErrorAction SilentlyContinue
+              
+              if (-not $enrollmentAccounts) {
+                  Write-Host "##vso[task.logissue type=error]❌ EA Enrollment Account '${{ parameters.eaEnrollmentAccountName }}' not found"
+                  Write-Host "##vso[task.logissue type=error]Available enrollment accounts:"
+                  $availableAccounts = Get-AzEnrollmentAccount -ErrorAction SilentlyContinue
+                  $availableAccounts | ForEach-Object { 
+                      Write-Host "##vso[task.logissue type=error]  - $($_.PrincipalName) ($($_.ObjectId))"
+                  }
+                  throw "EA Enrollment Account validation failed"
+              }
+              
+              Write-Host "✅ EA Enrollment Account found: $($enrollmentAccounts.PrincipalName)"
+              Write-Host "##vso[task.setvariable variable=eaValidationSuccess;isOutput=true]true"
+              
+          } catch {
+              Write-Host "##vso[task.logissue type=error]❌ EA validation failed: $($_.Exception.Message)"
+              Write-Host "##vso[task.setvariable variable=eaValidationSuccess;isOutput=true]false"
+              throw
+          }
+        azurePowerShellVersion: 'LatestVersion'
+        pwsh: true
+      name: validateEA
+
+- stage: CheckExistingSubscriptions
+  displayName: 'Check Existing Subscriptions'
+  dependsOn: ValidateEADetails
+  condition: succeeded()
+  jobs:
+  - job: CheckSubscriptions
+    displayName: 'Count Existing Subscriptions in Tenant Root'
+    timeoutInMinutes: 30
+    steps:
+    - task: AzurePowerShell@5
+      displayName: 'Count Subscriptions in Tenant Root'
+      inputs:
+        azureSubscription: 'Adia_Deploy'
+        ScriptType: 'InlineScript'
+        Inline: |
+          Write-Host "##[section]📊 Checking existing subscriptions in tenant root..."
+          
+          try {
+              # Get the tenant root management group
+              $tenantId = (Get-AzContext).Tenant.Id
+              $tenantRootMgmt = Get-AzManagementGroup -GroupName $tenantId -Expand -Recurse -ErrorAction SilentlyContinue
+              
+              if (-not $tenantRootMgmt) {
+                  Write-Host "##vso[task.logissue type=error]❌ Tenant Root Management Group not found"
+                  throw "Tenant Root Management Group not found"
+              }
+              
+              Write-Host "✅ Tenant Root Management Group found: $($tenantRootMgmt.DisplayName)"
+              
+              # Count subscriptions directly under tenant root (not in child management groups)
+              $tenantRootSubscriptions = @()
+              
+              if ($tenantRootMgmt.Children) {
+                  $tenantRootSubscriptions = $tenantRootMgmt.Children | Where-Object { 
+                      $_.Type -eq "Microsoft.Management/managementGroups/subscriptions" 
+                  }
+              }
+              
+              $subscriptionCount = $tenantRootSubscriptions.Count
+              
+              Write-Host "Current subscription count in tenant root: $subscriptionCount"
+              Write-Host "Maximum allowed subscriptions: ${{ parameters.maxSubscriptions }}"
+              Write-Host "Force create enabled: ${{ parameters.forceCreate }}"
+              
+              # List existing subscriptions with numbered names
+              if ($tenantRootSubscriptions.Count -gt 0) {
+                  Write-Host "##[section]Existing subscriptions in tenant root:"
+                  $numberedSubs = @()
+                  foreach ($sub in $tenantRootSubscriptions) {
+                      Write-Host "  - $($sub.DisplayName) ($($sub.Name))"
+                      # Extract number if subscription follows "Subscription X" pattern
+                      if ($sub.DisplayName -match "^Subscription (\d+)$") {
+                          $numberedSubs += [int]$matches[1]
+                      }
+                  }
+                  
+                  if ($numberedSubs.Count -gt 0) {
+                      $highestNumber = ($numberedSubs | Measure-Object -Maximum).Maximum
+                      Write-Host "Highest subscription number found: $highestNumber"
+                      Write-Host "##vso[task.setvariable variable=highestSubscriptionNumber;isOutput=true]$highestNumber"
+                  } else {
+                      Write-Host "No numbered subscriptions found"
+                      Write-Host "##vso[task.setvariable variable=highestSubscriptionNumber;isOutput=true]0"
+                  }
+              } else {
+                  Write-Host "No subscriptions found in tenant root"
+                  Write-Host "##vso[task.setvariable variable=highestSubscriptionNumber;isOutput=true]0"
+              }
+              
+              # Check if we should proceed with creation
+              $shouldCreate = $true
+              $reason = ""
+              
+              if ($subscriptionCount -ge ${{ parameters.maxSubscriptions }} -and -not $${{ parameters.forceCreate }}) {
+                  $shouldCreate = $false
+                  $reason = "Maximum subscription count (${{ parameters.maxSubscriptions }}) reached. Current count: $subscriptionCount"
+              } elseif ($subscriptionCount -ge ${{ parameters.maxSubscriptions }} -and $${{ parameters.forceCreate }}) {
+                  $shouldCreate = $true
+                  $reason = "Force create enabled - proceeding despite reaching maximum count"
+                  Write-Host "##vso[task.logissue type=warning]⚠️ Force create enabled - exceeding maximum subscription count"
+              } else {
+                  $subscriptionsToCreate = ${{ parameters.maxSubscriptions }} - $subscriptionCount
+                  $reason = "Will create $subscriptionsToCreate subscription(s). Current: $subscriptionCount, Max: ${{ parameters.maxSubscriptions }}"
+              }
+              
+              Write-Host "##[section]Decision: $reason"
+              Write-Host "Should create subscriptions: $shouldCreate"
+              
+              # Set pipeline variables
+              Write-Host "##vso[task.setvariable variable=currentSubscriptionCount;isOutput=true]$subscriptionCount"
+              Write-Host "##vso[task.setvariable variable=shouldCreateSubscriptions;isOutput=true]$shouldCreate"
+              Write-Host "##vso[task.setvariable variable=subscriptionCountReason;isOutput=true]$reason"
+              
+              if (-not $shouldCreate -and -not $${{ parameters.forceCreate }}) {
+                  Write-Host "##vso[task.logissue type=warning]⚠️ Subscription creation will be skipped due to count limits"
+                  Write-Host "##vso[task.logissue type=warning]Use 'Force Create' parameter to override this check"
+              }
+              
+          } catch {
+              Write-Host "##vso[task.logissue type=error]❌ Error checking subscriptions: $($_.Exception.Message)"
+              throw
+          }
+        azurePowerShellVersion: 'LatestVersion'
+        pwsh: true
+      name: checkSubs
+
+- stage: PrepareConfiguration
+  displayName: 'Prepare Terraform Configuration'
+  dependsOn: 
+    - ValidateEADetails
+    - CheckExistingSubscriptions
+  condition: |
+    and(
+      succeeded(),
+      eq(dependencies.CheckExistingSubscriptions.outputs['CheckSubscriptions.checkSubs.shouldCreateSubscriptions'], 'true')
+    )
+  variables:
+    shouldCreateSubscriptions: $[ stageDependencies.CheckExistingSubscriptions.CheckSubscriptions.outputs['checkSubs.shouldCreateSubscriptions'] ]
+    currentSubscriptionCount: $[ stageDependencies.CheckExistingSubscriptions.CheckSubscriptions.outputs['checkSubs.currentSubscriptionCount'] ]
+    highestSubscriptionNumber: $[ stageDependencies.CheckExistingSubscriptions.CheckSubscriptions.outputs['checkSubs.highestSubscriptionNumber'] ]
+  jobs:
+  - job: PrepareConfig
+    displayName: 'Generate Terraform Variables'
+    timeoutInMinutes: 30
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      
+    - task: PowerShell@2
+      displayName: 'Generate Terraform Variables File'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]📝 Generating Terraform variables for subscription creation..."
+          
+          # Calculate next subscription numbers
+          $highestNumber = [int]"$(highestSubscriptionNumber)"
+          $subscriptionsToCreate = ${{ parameters.maxSubscriptions }} - [int]"$(currentSubscriptionCount)"
+          
+          Write-Host "Highest existing subscription number: $highestNumber"
+          Write-Host "Subscriptions to create: $subscriptionsToCreate"
+          
+          # Create variables content
+          $varsContent = @"
+          # Generated EA Subscription Creation Variables
+          # Generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+          # Pipeline: $(Build.DefinitionName)
+          # Build: $(Build.BuildNumber)
+          
+          # Billing configuration (EA)
+          ea_billing_details = {
+            billing_account_name    = "${{ parameters.eaBillingAccountName }}"
+            enrollment_account_name = "${{ parameters.eaEnrollmentAccountName }}"
+          }
+          
+          # MCA billing details (set to null for EA)
+          mca_billing_details = null
+          
+          # Management Group configuration (tenant root - will be set to null to create under tenant root)
+          management_group_name = null
+          
+          # Identity configuration (using placeholder values - update as needed)
+          admin_entra_id_group_object_id = "00000000-0000-0000-0000-000000000000"
+          reader_entra_id_group_object_id = "00000000-0000-0000-0000-000000000000"
+          
+          # Network configuration (disabled for empty subscriptions)
+          vnet_spoke_details = {
+            enabled          = false
+            name_prefix      = "spoke-vnet"
+            address_prefixes = []
+            dns_servers      = []
+          }
+          
+          # Basic required variables
+          location = "westeurope"
+          suffix = "temp"
+          
+          # Tags (minimal for empty subscriptions)
+          tags = {
+            created_by = "ea-subscription-pipeline"
+            created_date = "`$(Get-Date -Format 'yyyy-MM-dd')"
+          }
+          
+          "@
+
+          # Write variables to file
+          $varsFilePath = "$(Agent.TempDirectory)/ea-subscription.tfvars"
+          $varsContent | Out-File -FilePath $varsFilePath -Encoding UTF8
+          
+          Write-Host "✅ Generated Terraform variables file: $varsFilePath"
+          Write-Host "##[section]Variables content preview:"
+          Write-Host $varsContent
+          
+          # Set pipeline variable for later stages
+          Write-Host "##vso[task.setvariable variable=terraformVarsFile;isOutput=true]$varsFilePath"
+        errorActionPreference: 'Stop'
+      name: prepareConfig
+
+- stage: TerraformPlan
+  displayName: 'Terraform Plan'
+  dependsOn: PrepareConfiguration
+  condition: succeeded()
+  variables:
+    terraformVarsFile: $[ stageDependencies.PrepareConfiguration.PrepareConfig.outputs['prepareConfig.terraformVarsFile'] ]
+  jobs:
+  - job: TerraformPlan
+    displayName: 'Generate Terraform Plan'
+    timeoutInMinutes: 60
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+
+    - task: PowerShell@2
+      displayName: 'Build Trigger Detection'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔍 Build Trigger Detection"
+          Write-Host "=================================="
+          Write-Host "Build Reason: $(Build.Reason)"
+          Write-Host "Source Version Message: $(Build.SourceVersionMessage)"
+          Write-Host "Source Branch: $(Build.SourceBranch)"
+          Write-Host ""
+          Write-Host "Detection Results:"
+          Write-Host "• Is PR: $(isPR)"
+          Write-Host "• Is PR Merged: $(isPRMerged)" 
+          Write-Host "• Should Run Plan Only: $(shouldRunPlanOnly)"
+          Write-Host "• Should Run Plan and Apply: $(shouldRunPlanAndApply)"
+          Write-Host ""
+          
+          if ("$(shouldRunPlanOnly)" -eq "True") {
+              Write-Host "##[section]📋 PLAN ONLY MODE (Pull Request)"
+              Write-Host "This build will only generate a Terraform plan for review."
+              Write-Host "No subscriptions will be created."
+          } elseif ("$(shouldRunPlanAndApply)" -eq "True") {
+              Write-Host "##[section]🚀 PLAN AND APPLY MODE"
+              Write-Host "This build will generate a plan AND apply changes (subject to approvals)."
+          } else {
+              Write-Host "##[section]ℹ️ BUILD MODE DETECTION"
+              Write-Host "Build trigger conditions don't match expected patterns."
+          }
+
+    - task: PowerShell@2
+      displayName: 'Setup Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔧 Setting up Terraform..."
+          
+          # Check if terraform is available
+          $terraformPath = Get-Command terraform -ErrorAction SilentlyContinue
+          if ($terraformPath) {
+              Write-Host "✅ Terraform found: $($terraformPath.Source)"
+              terraform version
+              return
+          }
+          
+          # Download and install Terraform if not found
+          Write-Host "Downloading Terraform..."
+          $terraformVersion = "1.5.7"
+          $url = "https://releases.hashicorp.com/terraform/${terraformVersion}/terraform_${terraformVersion}_windows_amd64.zip"
+          
+          try {
+              Invoke-WebRequest -Uri $url -OutFile "terraform.zip" -UseBasicParsing
+              Expand-Archive "terraform.zip" -DestinationPath "." -Force
+              
+              $currentDir = (Get-Location).Path
+              $env:PATH = "$currentDir;$env:PATH"
+              Write-Host "##vso[task.setvariable variable=PATH]$currentDir;$env:PATH"
+              
+              Write-Host "✅ Terraform installed"
+              terraform version
+          } catch {
+              Write-Host "##vso[task.logissue type=error]Failed to install Terraform: $($_.Exception.Message)"
+              throw
+          }
+
+    - task: PowerShell@2
+      displayName: 'Snyk Auth'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔐 Setting up Snyk authentication..."
+          echo "##vso[task.setvariable variable=SNYK_TOKEN;isOutput=true]$(SNYK_TOKEN)"
+      name: getSnykToken
+
+    - task: PowerShell@2
+      displayName: 'Snyk Install & Auth'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]📦 Installing and authenticating Snyk..."
+          
+          # Install Snyk globally
+          npm install -g snyk
+          
+          # Authenticate with Snyk using token
+          snyk auth $(SNYK_TOKEN)
+          
+          Write-Host "✅ Snyk installed and authenticated"
+
+    - task: PowerShell@2
+      displayName: 'Snyk IaC Scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔍 Running Snyk Infrastructure as Code scan..."
+          
+          try {
+              # Run Snyk IaC scan on Terraform files
+              snyk iac test --sarif-file-output=./results-iac.sarif --report
+              $RESULT_IAC = $LASTEXITCODE
+              
+              Write-Host "Snyk IaC scan completed with exit code: $RESULT_IAC"
+              
+              # Generate HTML report if results exist
+              if (Test-Path "./results-iac.html") {
+                  Move-Item "./results-iac.html" "$(Build.Repository.LocalPath)/results-iac.html"
+                  Write-Host "✅ Snyk IaC HTML report generated: results-iac.html"
+              }
+              
+              # Parse SARIF results for summary
+              if (Test-Path "./results-iac.sarif") {
+                  $sarif = Get-Content "./results-iac.sarif" | ConvertFrom-Json
+                  $issueCount = 0
+                  if ($sarif.runs -and $sarif.runs[0].results) {
+                      $issueCount = $sarif.runs[0].results.Count
+                  }
+                  Write-Host "Snyk IaC found $issueCount issues"
+              }
+              
+              Write-Host "##vso[task.setvariable variable=SNYK_IAC_RESULT;isOutput=true]$RESULT_IAC"
+              
+          } catch {
+              Write-Host "##vso[task.logissue type=warning]⚠️ Snyk IaC scan failed: $($_.Exception.Message)"
+              Write-Host "##vso[task.setvariable variable=SNYK_IAC_RESULT;isOutput=true]1"
+          }
+        workingDirectory: '$(terraformWorkingDirectory)'
+        continueOnError: true
+      name: snykScan
+
+    - task: AzureCLI@2
+      displayName: 'Terraform Init and Plan'
+      inputs:
+        azureSubscription: 'Adia_Deploy'
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        workingDirectory: '$(terraformWorkingDirectory)'
+        addSpnToEnvironment: true
+        inlineScript: |
+          Write-Host "##[section]🚀 Initializing and planning Terraform for EA subscription creation..."
+          
+          # Set Terraform authentication
+          $env:ARM_CLIENT_ID = $env:servicePrincipalId
+          $env:ARM_TENANT_ID = $env:tenantId
+          $env:ARM_OIDC_TOKEN = $env:idToken
+          $env:ARM_USE_OIDC = "true"
+          
+          # Use current subscription context for Terraform operations
+          $currentSub = az account show --query "id" -o tsv
+          $env:ARM_SUBSCRIPTION_ID = $currentSub
+          
+          Write-Host "🔐 Authentication configured:"
+          Write-Host "  Client ID: $($env:ARM_CLIENT_ID.Substring(0,8))..."
+          Write-Host "  Tenant ID: $($env:ARM_TENANT_ID.Substring(0,8))..."
+          Write-Host "  Subscription ID: $($env:ARM_SUBSCRIPTION_ID.Substring(0,8))..."
+          
+          # Initialize Terraform
+          Write-Host "##[section]Initializing Terraform..."
+          terraform init
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "##vso[task.logissue type=error]❌ Terraform init failed"
+              throw "Terraform init failed"
+          }
+          
+          # Generate plan
+          Write-Host "##[section]Generating Terraform plan..."
+          $planFile = "ea-subscription-plan.tfplan"
+          $varsFile = "$(terraformVarsFile)"
+          
+          Write-Host "Using variables file: $varsFile"
+          if (-not (Test-Path $varsFile)) {
+              Write-Host "##vso[task.logissue type=error]❌ Variables file not found: $varsFile"
+              throw "Variables file not found"
+          }
+          
+          terraform plan -var-file="$varsFile" -out="$planFile" -detailed-exitcode
+          $planExitCode = $LASTEXITCODE
+          
+          switch ($planExitCode) {
+              0 { 
+                  Write-Host "✅ No changes detected - infrastructure is up to date"
+                  Write-Host "##vso[task.setvariable variable=hasChanges;isOutput=true]false"
+              }
+              1 { 
+                  Write-Host "##vso[task.logissue type=error]❌ Terraform plan failed"
+                  throw "Terraform plan failed"
+              }
+              2 { 
+                  Write-Host "✅ Plan generated successfully - changes detected"
+                  Write-Host "##vso[task.setvariable variable=hasChanges;isOutput=true]true"
+              }
+              default { 
+                  Write-Host "##vso[task.logissue type=error]❌ Unexpected plan exit code: $planExitCode"
+                  throw "Terraform plan failed with unexpected exit code"
+              }
+          }
+          
+          # Show plan output
+          Write-Host "##[section]📋 Plan Summary:"
+          terraform show -no-color "$planFile"
+          
+          Write-Host "##vso[task.setvariable variable=planFile;isOutput=true]$planFile"
+      name: terraformPlan
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Snyk Results'
+      inputs:
+        pathToPublish: './results-iac.html'
+        artifactName: 'snyk-iac-results'
+        includeRootFolder: false
+      condition: and(succeeded(), ne(variables['snykScan.SNYK_IAC_RESULT'], '0'))
+
+- stage: ManualApproval
+  displayName: 'Manual Approval for Subscription Creation'
+  dependsOn: TerraformPlan
+  condition: |
+    and(
+      succeeded(),
+      eq(dependencies.TerraformPlan.outputs['TerraformPlan.terraformPlan.hasChanges'], 'true'),
+      eq('${{ parameters.dryRun }}', false),
+      eq('${{ parameters.runApply }}', true)
+    )
+  jobs:
+  - job: waitForValidation
+    displayName: 'Wait for Manual Approval'
+    pool: server
+    timeoutInMinutes: 1440 # 24 hours timeout
+    steps:
+    - task: ManualValidation@0
+      displayName: 'Approve Subscription Creation'
+      timeoutInMinutes: 1440
+      inputs:
+        notifyUsers: '$(Build.RequestedForEmail)'
+        instructions: |
+          🚨 EA SUBSCRIPTION CREATION APPROVAL REQUIRED 🚨
+          
+          Please review the following details before approving:
+          
+          📋 Configuration:
+          • EA Billing Account: ${{ parameters.eaBillingAccountName }}
+          • EA Enrollment Account: ${{ parameters.eaEnrollmentAccountName }}
+          • Target Location: Tenant Root (no management group)
+          • Max Subscriptions: ${{ parameters.maxSubscriptions }}
+          • Subscriptions will be named: Subscription 1, Subscription 2, etc.
+          
+          ⚠️ IMPORTANT NOTES:
+          • This will create new Azure subscriptions using EA billing
+          • Subscriptions will be created directly under the tenant root
+          • Subscriptions will be empty with no resources
+          • EA charges will apply for any resources created in these subscriptions
+          • Review the Terraform plan output above for exact changes
+          
+          ✅ Click "Resume" to approve and create subscription(s)
+          ❌ Click "Reject" to cancel the pipeline
+
+- stage: TerraformApply
+  displayName: 'Create EA Subscriptions'
+  dependsOn: 
+    - TerraformPlan
+    - ManualApproval
+  condition: |
+    and(
+      in(dependencies.TerraformPlan.result, 'Succeeded'),
+      in(dependencies.ManualApproval.result, 'Succeeded', 'Skipped'),
+      eq(dependencies.TerraformPlan.outputs['TerraformPlan.terraformPlan.hasChanges'], 'true'),
+      eq('${{ parameters.runApply }}', true),
+      or(
+        eq('${{ parameters.dryRun }}', false),
+        eq(dependencies.ManualApproval.result, 'Succeeded')
+      )
+    )
+  variables:
+    terraformVarsFile: $[ stageDependencies.PrepareConfiguration.PrepareConfig.outputs['prepareConfig.terraformVarsFile'] ]
+    planFile: $[ stageDependencies.TerraformPlan.TerraformPlan.outputs['terraformPlan.planFile'] ]
+    highestSubscriptionNumber: $[ stageDependencies.CheckExistingSubscriptions.CheckSubscriptions.outputs['checkSubs.highestSubscriptionNumber'] ]
+  jobs:
+  - deployment: CreateSubscriptions
+    displayName: 'Apply Terraform Configuration'
+    timeoutInMinutes: 180
+    environment: 'ea-subscription-creation'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: PowerShell@2
+            displayName: 'Pre-Apply Validation'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "##[section]✅ MANUAL APPROVAL RECEIVED"
+                Write-Host "##[section]Proceeding with EA subscription creation..."
+                Write-Host "Dry Run Mode: ${{ parameters.dryRun }}"
+                Write-Host "Variables File: $(terraformVarsFile)"
+                Write-Host "Plan File: $(planFile)"
+
+          - task: AzureCLI@2
+            displayName: 'Apply Terraform Configuration'
+            inputs:
+              azureSubscription: 'Adia_Deploy'
+              scriptType: 'pscore'
+              scriptLocation: 'inlineScript'
+              workingDirectory: '$(terraformWorkingDirectory)'
+              addSpnToEnvironment: true
+              inlineScript: |
+                Write-Host "##[section]🚀 Applying Terraform configuration to create EA subscriptions..."
+                
+                # Set Terraform authentication
+                $env:ARM_CLIENT_ID = $env:servicePrincipalId
+                $env:ARM_TENANT_ID = $env:tenantId
+                $env:ARM_OIDC_TOKEN = $env:idToken
+                $env:ARM_USE_OIDC = "true"
+                
+                # Use current subscription context
+                $currentSub = az account show --query "id" -o tsv
+                $env:ARM_SUBSCRIPTION_ID = $currentSub
+                
+                Write-Host "🔐 Authentication configured for apply"
+                
+                # Re-initialize to ensure consistent state
+                Write-Host "##[section]Re-initializing Terraform..."
+                terraform init
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "##vso[task.logissue type=error]❌ Terraform init failed"
+                    throw "Terraform init failed"
+                }
+                
+                # Apply the configuration
+                Write-Host "##[section]Applying Terraform plan..."
+                $varsFile = "$(terraformVarsFile)"
+                
+                if (-not (Test-Path $varsFile)) {
+                    Write-Host "##vso[task.logissue type=error]❌ Variables file not found: $varsFile"
+                    throw "Variables file not found"
+                }
+                
+                terraform apply -var-file="$varsFile" -auto-approve
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "##vso[task.logissue type=error]❌ Terraform apply failed"
+                    throw "Terraform apply failed"
+                }
+                
+                Write-Host "##[section]✅ EA subscriptions created successfully!"
+                
+                # Get outputs
+                Write-Host "##[section]📋 Terraform Outputs:"
+                terraform output -json | ConvertFrom-Json | ConvertTo-Json -Depth 10
+
+- stage: PostCreationValidation
+  displayName: 'Post-Creation Validation'
+  dependsOn: TerraformApply
+  condition: |
+    and(
+      succeeded(),
+      eq('${{ parameters.runApply }}', true)
+    )
+  jobs:
+  - job: ValidateCreatedSubscriptions
+    displayName: 'Validate Created Subscriptions'
+    timeoutInMinutes: 30
+    steps:
+    - task: AzurePowerShell@5
+      displayName: 'Verify Created Subscriptions'
+      inputs:
+        azureSubscription: 'Adia_Deploy'
+        ScriptType: 'InlineScript'
+        Inline: |
+          Write-Host "🔍 Validating created subscriptions..."
+          
+          try {
+              # Get tenant root management group
+              $tenantId = (Get-AzContext).Tenant.Id
+              $mgmt = Get-AzManagementGroup -GroupName $tenantId -Expand -Recurse
+              
+              # Count subscriptions in tenant root
+              $subscriptions = $mgmt.Children | Where-Object { $_.Type -eq "Microsoft.Management/managementGroups/subscriptions" }
+              $newCount = $subscriptions.Count
+              
+              Write-Host "##[section]📊 Post-creation subscription count: $newCount"
+              
+              # List all subscriptions in tenant root with focus on numbered ones
+              if ($subscriptions.Count -gt 0) {
+                  Write-Host "##[section]Subscriptions in tenant root:"
+                  $numberedSubs = @()
+                  $subscriptions | ForEach-Object {
+                      Write-Host "  ✅ $($_.DisplayName) ($($_.Name))"
+                      # Track numbered subscriptions
+                      if ($_.DisplayName -match "^Subscription (\d+)$") {
+                          $numberedSubs += [int]$matches[1]
+                      }
+                  }
+                  
+                  if ($numberedSubs.Count -gt 0) {
+                      $numberedSubs = $numberedSubs | Sort-Object
+                      Write-Host "##[section]Numbered subscriptions found: $($numberedSubs -join ', ')"
+                      Write-Host "Highest subscription number: $(($numberedSubs | Measure-Object -Maximum).Maximum)"
+                  }
+              }
+              
+              # Validate that subscriptions were created with correct properties
+              foreach ($sub in $subscriptions) {
+                  $subDetails = Get-AzSubscription -SubscriptionId $sub.Name
+                  Write-Host "##[section]Subscription Details: $($subDetails.Name)"
+                  Write-Host "  State: $($subDetails.State)"
+                  Write-Host "  Tenant ID: $($subDetails.TenantId)"
+                  
+                  if ($subDetails.State -ne "Enabled") {
+                      Write-Host "##vso[task.logissue type=warning]⚠️ Subscription $($subDetails.Name) is not in Enabled state"
+                  }
+              }
+              
+              Write-Host "##[section]✅ Post-creation validation completed successfully!"
+              
+          } catch {
+              Write-Host "##vso[task.logissue type=error]❌ Post-creation validation failed: $($_.Exception.Message)"
+              throw
+          }
+        azurePowerShellVersion: 'LatestVersion'
+        pwsh: true
+
+- stage: Summary
+  displayName: 'Pipeline Summary'
+  dependsOn: 
+    - ValidateEADetails
+    - CheckExistingSubscriptions
+    - PrepareConfiguration
+    - TerraformPlan
+    - ManualApproval
+    - TerraformApply
+    - PostCreationValidation
+  condition: always()
+  jobs:
+  - job: GenerateSummary
+    displayName: 'Generate Pipeline Summary'
+    timeoutInMinutes: 30
+    steps:
+    - task: PowerShell@2
+      displayName: 'Pipeline Summary Report'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🏁 EA Subscription Creation Pipeline Summary"
+          Write-Host "=================================================="
+          Write-Host "Build: $(Build.BuildNumber)"
+          Write-Host "Started: $(System.PipelineStartTime)"
+          Write-Host "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          Write-Host ""
+          
+          Write-Host "##[section]� Build Trigger Information:"
+          Write-Host "• Build Reason: $(Build.Reason)"
+          Write-Host "• Source Branch: $(Build.SourceBranch)"
+          Write-Host "• Is PR: $(isPR)"
+          Write-Host "• Is PR Merged: $(isPRMerged)"
+          Write-Host "• Plan Only Mode: $(shouldRunPlanOnly)"
+          Write-Host "• Plan and Apply Mode: $(shouldRunPlanAndApply)"
+          Write-Host ""
+          
+          Write-Host "##[section]�📋 Configuration Used:"
+          Write-Host "• EA Billing Account: ${{ parameters.eaBillingAccountName }}"
+          Write-Host "• EA Enrollment Account: ${{ parameters.eaEnrollmentAccountName }}"
+          Write-Host "• Target Location: Tenant Root"
+          Write-Host "• Max Subscriptions: ${{ parameters.maxSubscriptions }}"
+          Write-Host "• Subscription Naming: Subscription 1, 2, 3, etc."
+          Write-Host "• Dry Run: ${{ parameters.dryRun }}"
+          Write-Host "• Force Create: ${{ parameters.forceCreate }}"
+          Write-Host ""
+          
+          # Determine overall pipeline status
+          $overallStatus = "✅ Success"
+          
+          # Check execution mode
+          if ("$(shouldRunPlanOnly)" -eq "True") {
+              $overallStatus = "📋 Plan Only Completed (PR Mode)"
+              Write-Host "##[section]$overallStatus - Plan generated for review, no subscriptions created"
+          } elseif ("${{ parameters.dryRun }}" -eq "true") {
+              $overallStatus = "📋 Dry Run Completed"
+              Write-Host "##[section]$overallStatus - No subscriptions were created (Dry Run mode)"
+          } elseif ("$(shouldRunPlanAndApply)" -eq "True") {
+              $overallStatus = "✅ Plan and Apply Completed"
+              Write-Host "##[section]$overallStatus - Pipeline completed with full execution"
+          } else {
+              Write-Host "##[section]$overallStatus - Pipeline completed"
+          }

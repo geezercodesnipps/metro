@@ -1,0 +1,365 @@
+# Security Scan Template for ADIA Metropolis
+# Reusable Azure DevOps Pipeline Template for Multi-Cloud Security Scanning
+
+parameters:
+  - name: cloudProvider
+    type: string
+    values:
+      - azure
+      - aws
+      - multicloud
+  - name: scanPath
+    type: string
+  - name: failOnHighSeverity
+    type: boolean
+    default: true
+  - name: failOnMediumSeverity
+    type: boolean
+    default: false
+
+steps:
+  - task: NodeTool@0
+    displayName: 'Install Node.js'
+    inputs:
+      versionSpec: '18.x'
+
+  - task: PowerShell@2
+    displayName: 'Install Security Scanning Tools'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Installing security scanning tools..."
+        
+        # Install Python packages (Checkov)
+        try {
+          Write-Host "Installing Checkov for infrastructure scanning..."
+          python -m pip install --upgrade pip
+          python -m pip install checkov
+          Write-Host "✅ Checkov installed successfully"
+        } catch {
+          Write-Host "⚠️ Failed to install Checkov: $_"
+        }
+        
+        # Install TFSec for Windows
+        try {
+          Write-Host "Installing TFSec for Terraform security scanning..."
+          $tfsecVersion = "1.28.1"
+          $downloadUrl = "https://github.com/aquasecurity/tfsec/releases/download/v$tfsecVersion/tfsec-windows-amd64.exe"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile "tfsec.exe"
+          $env:PATH += ";$(Get-Location)"
+          Write-Host "✅ TFSec installed successfully"
+        } catch {
+          Write-Host "⚠️ Failed to install TFSec: $_"
+        }
+        
+        # Install Trivy for Windows
+        try {
+          Write-Host "Installing Trivy for additional security scanning..."
+          $trivyVersion = "0.45.0"
+          $downloadUrl = "https://github.com/aquasecurity/trivy/releases/download/v$trivyVersion/trivy_${trivyVersion}_Windows-64bit.zip"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile "trivy.zip"
+          Expand-Archive -Path "trivy.zip" -DestinationPath "." -Force
+          $env:PATH += ";$(Get-Location)"
+          Write-Host "✅ Trivy installed successfully"
+        } catch {
+          Write-Host "⚠️ Failed to install Trivy: $_"
+        }
+        
+        # Install AWS CLI if needed
+        if ("${{ parameters.cloudProvider }}" -eq "aws" -or "${{ parameters.cloudProvider }}" -eq "multicloud") {
+          try {
+            Write-Host "Installing AWS CLI..."
+            if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+              $awsCliUrl = "https://awscli.amazonaws.com/AWSCLIV2.msi"
+              Invoke-WebRequest -Uri $awsCliUrl -OutFile "AWSCLIV2.msi"
+              Start-Process msiexec.exe -Wait -ArgumentList "/i AWSCLIV2.msi /quiet"
+              Write-Host "✅ AWS CLI installed successfully"
+            } else {
+              Write-Host "✅ AWS CLI already installed"
+            }
+          } catch {
+            Write-Host "⚠️ Failed to install AWS CLI: $_"
+          }
+        }
+        
+        # Azure CLI should already be available on Azure DevOps agents
+        if ("${{ parameters.cloudProvider }}" -eq "azure" -or "${{ parameters.cloudProvider }}" -eq "multicloud") {
+          Write-Host "✅ Azure CLI available on Azure DevOps agents"
+        }
+
+  - task: PowerShell@2
+    displayName: 'Run Checkov Infrastructure Scan'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Running Checkov scan on ${{ parameters.scanPath }}..."
+        
+        try {
+          # Configure Checkov based on cloud provider
+          if ("${{ parameters.cloudProvider }}" -eq "azure") {
+            Write-Host "Running Azure-specific Checkov scan..."
+            python -m checkov.main -d "${{ parameters.scanPath }}" --framework terraform --check CKV_AZURE* --output json --output-file checkov-azure-results.json
+          } elseif ("${{ parameters.cloudProvider }}" -eq "aws") {
+            Write-Host "Running AWS-specific Checkov scan..."
+            python -m checkov.main -d "${{ parameters.scanPath }}" --framework terraform --check CKV_AWS* --output json --output-file checkov-aws-results.json
+          } else {
+            Write-Host "Running multi-cloud Checkov scan..."
+            python -m checkov.main -d "${{ parameters.scanPath }}" --framework terraform --output json --output-file checkov-multicloud-results.json
+          }
+          
+          Write-Host "✅ Checkov scan completed. Results saved."
+        } catch {
+          Write-Host "⚠️ Checkov scan failed: $_"
+        }
+    continueOnError: true
+
+  - task: PowerShell@2
+    displayName: 'Run TFSec Terraform Security Scan'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Running TFSec scan on ${{ parameters.scanPath }}..."
+        
+        try {
+          # Run TFSec scan
+          .\tfsec.exe "${{ parameters.scanPath }}" --format json --out tfsec-results.json
+          
+          # Display summary
+          Write-Host "✅ TFSec scan completed."
+          .\tfsec.exe "${{ parameters.scanPath }}" --format table
+        } catch {
+          Write-Host "⚠️ TFSec scan failed: $_"
+        }
+    continueOnError: true
+
+  - task: PowerShell@2
+    displayName: 'Run Trivy Configuration Scan'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Running Trivy configuration scan..."
+        
+        try {
+          # Run Trivy config scan
+          .\trivy.exe config "${{ parameters.scanPath }}" --format json --output trivy-config-results.json
+          
+          # Display summary
+          Write-Host "✅ Trivy configuration scan completed."
+          .\trivy.exe config "${{ parameters.scanPath }}" --format table
+        } catch {
+          Write-Host "⚠️ Trivy scan failed: $_"
+        }
+    continueOnError: true
+
+  - task: PowerShell@2
+    displayName: 'Run Custom ADIA Security Checks'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Running custom ADIA security checks..."
+        
+        # Custom security checks for ADIA requirements
+        $scanPath = "${{ parameters.scanPath }}"
+        
+        # Check for hardcoded secrets
+        Write-Host "Checking for hardcoded secrets..."
+        try {
+          $secretPatterns = @("password", "secret", "key")
+          $tfFiles = Get-ChildItem -Path $scanPath -Recurse -Include "*.tf", "*.tfvars"
+          
+          foreach ($file in $tfFiles) {
+            $content = Get-Content $file.FullName
+            foreach ($line in $content) {
+              if ($line -match "password|secret|key" -and $line -notmatch "^#" -and $line -notmatch "variable|var\.") {
+                Write-Host "⚠️ WARNING: Potential hardcoded secret found in $($file.Name): $line"
+              }
+            }
+          }
+        } catch {
+          Write-Host "⚠️ Failed to check for secrets: $_"
+        }
+        
+        # Check for public access configurations
+        Write-Host "Checking for public access configurations..."
+        try {
+          $tfFiles = Get-ChildItem -Path $scanPath -Recurse -Include "*.tf"
+          
+          foreach ($file in $tfFiles) {
+            $content = Get-Content $file.FullName
+            foreach ($line in $content) {
+              if ($line -match "0\.0\.0\.0/0|public") {
+                Write-Host "⚠️ WARNING: Public access configuration found in $($file.Name): $line"
+              }
+            }
+          }
+        } catch {
+          Write-Host "⚠️ Failed to check for public access: $_"
+        }
+        
+        # Cloud-specific checks
+        if ("${{ parameters.cloudProvider }}" -eq "azure" -or "${{ parameters.cloudProvider }}" -eq "multicloud") {
+          Write-Host "Running Azure-specific security checks..."
+          
+          # Check for storage account public access
+          try {
+            $tfFiles = Get-ChildItem -Path $scanPath -Recurse -Include "*.tf"
+            foreach ($file in $tfFiles) {
+              $content = Get-Content $file.FullName
+              foreach ($line in $content) {
+                if ($line -match "allow_blob_public_access.*true") {
+                  Write-Host "⚠️ WARNING: Azure Storage account with public blob access found in $($file.Name): $line"
+                }
+              }
+            }
+          } catch {
+            Write-Host "⚠️ Failed Azure storage check: $_"
+          }
+          
+          # Check for Key Vault access policies
+          try {
+            $kvPolicyFound = $false
+            $tfFiles = Get-ChildItem -Path $scanPath -Recurse -Include "*.tf"
+            foreach ($file in $tfFiles) {
+              $content = Get-Content $file.FullName -Raw
+              if ($content -match "key_vault_access_policy|access_policy") {
+                $kvPolicyFound = $true
+                break
+              }
+            }
+            if (-not $kvPolicyFound) {
+              Write-Host "ℹ️ INFO: Consider implementing Azure Key Vault access policies"
+            }
+          } catch {
+            Write-Host "⚠️ Failed Key Vault check: $_"
+          }
+        }
+        
+        if ("${{ parameters.cloudProvider }}" -eq "aws" -or "${{ parameters.cloudProvider }}" -eq "multicloud") {
+          Write-Host "Running AWS-specific security checks..."
+          
+          # Check for S3 bucket public access
+          try {
+            $tfFiles = Get-ChildItem -Path $scanPath -Recurse -Include "*.tf"
+            foreach ($file in $tfFiles) {
+              $content = Get-Content $file.FullName
+              foreach ($line in $content) {
+                if ($line -match "acl.*public") {
+                  Write-Host "⚠️ WARNING: AWS S3 bucket with public ACL found in $($file.Name): $line"
+                }
+              }
+            }
+          } catch {
+            Write-Host "⚠️ Failed S3 check: $_"
+          }
+          
+          # Check for wide-open security groups
+          try {
+            $tfFiles = Get-ChildItem -Path $scanPath -Recurse -Include "*.tf"
+            foreach ($file in $tfFiles) {
+              $content = Get-Content $file.FullName
+              foreach ($line in $content) {
+                if ($line -match "from_port.*0.*to_port.*65535") {
+                  Write-Host "⚠️ WARNING: AWS Security group with wide-open ports found in $($file.Name): $line"
+                }
+              }
+            }
+          } catch {
+            Write-Host "⚠️ Failed security group check: $_"
+          }
+        }
+    continueOnError: true
+
+  - task: PowerShell@2
+    displayName: 'Generate Security Report Summary'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Generating security report summary..."
+        
+        # Create consolidated security report
+        $cloudProvider = "${{ parameters.cloudProvider }}"
+        $scanPath = "${{ parameters.scanPath }}"
+        $currentDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        
+        $reportLines = @(
+          "================================================",
+          "ADIA Metropolis Security Scan Summary",
+          "================================================",
+          "Cloud Provider: $cloudProvider",
+          "Scan Path: $scanPath",
+          "Scan Date: $currentDate",
+          "",
+          "Scan Tools Used:",
+          "- Checkov (Infrastructure as Code)",
+          "- TFSec (Terraform Security)",
+          "- Trivy (Configuration Security)",
+          "- Custom ADIA Security Checks",
+          "",
+          "Results:",
+          "- Checkov results: checkov-*-results.json",
+          "- TFSec results: tfsec-results.json",
+          "- Trivy results: trivy-config-results.json",
+          "",
+          "================================================"
+        )
+        
+        $reportContent = $reportLines -join "`n"
+        $reportContent | Out-File -FilePath "security-report-summary.txt" -Encoding UTF8
+        
+        Write-Host "Security scan summary:"
+        Get-Content "security-report-summary.txt"
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Security Scan Results'
+    inputs:
+      pathToPublish: '.'
+      artifactName: 'security-scan-results-${{ parameters.cloudProvider }}'
+      includeRootFolder: false
+    condition: always()
+
+  - task: PowerShell@2
+    displayName: 'Evaluate Security Scan Results'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Evaluating security scan results..."
+        
+        # Initialize counters
+        $highSeverityCount = 0
+        $mediumSeverityCount = 0
+        
+        # Parse Checkov results for high/medium severity
+        try {
+          $checkovFiles = Get-ChildItem -Filter "checkov-*-results.json" -ErrorAction SilentlyContinue
+          if ($checkovFiles) {
+            foreach ($file in $checkovFiles) {
+              $json = Get-Content $file.FullName -Raw | ConvertFrom-Json
+              if ($json.results -and $json.results.failed_checks) {
+                $highSeverityIssues = $json.results.failed_checks | Where-Object { $_.severity -eq "HIGH" }
+                $mediumSeverityIssues = $json.results.failed_checks | Where-Object { $_.severity -eq "MEDIUM" }
+                
+                $highSeverityCount += $highSeverityIssues.Count
+                $mediumSeverityCount += $mediumSeverityIssues.Count
+              }
+            }
+          }
+        } catch {
+          Write-Host "Warning: Could not parse Checkov results: $_"
+        }
+        
+        Write-Host "High severity issues found: $highSeverityCount"
+        Write-Host "Medium severity issues found: $mediumSeverityCount"
+        
+        # Fail build based on parameters
+        if ("${{ parameters.failOnHighSeverity }}" -eq "true" -and $highSeverityCount -gt 0) {
+          Write-Host "##vso[task.logissue type=error]High severity security issues found. Build failed."
+          exit 1
+        }
+        
+        if ("${{ parameters.failOnMediumSeverity }}" -eq "true" -and $mediumSeverityCount -gt 0) {
+          Write-Host "##vso[task.logissue type=error]Medium severity security issues found. Build failed."
+          exit 1
+        }
+        
+        Write-Host "Security scan evaluation completed successfully."
+    continueOnError: false

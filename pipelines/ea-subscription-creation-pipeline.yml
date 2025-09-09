@@ -1,0 +1,170 @@
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    include:
+    - infrastructure/azure/*
+    - pipelines/templates/ea-subscription-creation-template.yml
+
+pr:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    include:
+    - infrastructure/azure/*
+    - pipelines/templates/ea-subscription-creation-template.yml
+
+parameters:
+- name: maxSubscriptions
+  displayName: 'Maximum Number of Subscriptions to Create'
+  type: number
+  default: 1
+  
+- name: eaBillingAccountName
+  displayName: 'EA Billing Account Name'
+  type: string
+  default: ''
+  
+- name: eaEnrollmentAccountName
+  displayName: 'EA Enrollment Account Name' 
+  type: string
+  default: ''
+
+- name: dryRun
+  displayName: 'Dry Run (Plan Only - No Subscription Creation)'
+  type: boolean
+  default: true
+
+- name: forceCreate
+  displayName: 'Force Create (Override Subscription Count Check)'
+  type: boolean
+  default: false
+
+variables:
+  # Build-level variables
+  - name: pipelineType
+    value: 'EA Subscription Creation'
+  - name: serviceConnection
+    value: 'Adia_Deploy'
+  # Variable group containing Snyk token
+  - group: Vaxowave
+  # PR detection variables
+  - name: isPR
+    value: ${{ eq(variables['Build.Reason'], 'PullRequest') }}
+  - name: isMergedPR
+    value: ${{ and(eq(variables['Build.Reason'], 'IndividualCI'), contains(variables['Build.SourceBranch'], 'refs/heads/')) }}
+  - name: shouldRunApply
+    value: ${{ or(eq(variables['Build.Reason'], 'Manual'), variables.isMergedPR) }}
+
+pool:
+  name: 'selfhosted'
+
+stages:
+- stage: BuildTriggerDetection
+  displayName: 'Detect Build Trigger'
+  jobs:
+  - job: DetectTrigger
+    displayName: 'Analyze Build Trigger'
+    timeoutInMinutes: 5
+    steps:
+    - task: PowerShell@2
+      displayName: 'Display Build Trigger Information'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔍 Build Trigger Analysis"
+          Write-Host "Build Reason: $(Build.Reason)"
+          Write-Host "Source Branch: $(Build.SourceBranch)"
+          Write-Host "Is PR: $(isPR)"
+          Write-Host "Is Merged PR: $(isMergedPR)"
+          Write-Host "Should Run Apply: $(shouldRunApply)"
+          
+          if ("$(isPR)" -eq "True") {
+              Write-Host "##[section]📋 PR MODE - Will run PLAN only"
+              Write-Host "##vso[task.setvariable variable=executionMode;isOutput=true]PLAN_ONLY"
+          } elseif ("$(shouldRunApply)" -eq "True") {
+              Write-Host "##[section]🚀 FULL MODE - Will run PLAN and APPLY"
+              Write-Host "##vso[task.setvariable variable=executionMode;isOutput=true]PLAN_AND_APPLY"
+          } else {
+              Write-Host "##[section]⚠️ UNKNOWN MODE - Defaulting to PLAN only"
+              Write-Host "##vso[task.setvariable variable=executionMode;isOutput=true]PLAN_ONLY"
+          }
+      name: TriggerDetection
+
+- stage: PreValidation
+  displayName: 'Pre-Validation Checks'
+  dependsOn: BuildTriggerDetection
+  variables:
+    executionMode: $[ stageDependencies.BuildTriggerDetection.DetectTrigger.outputs['TriggerDetection.executionMode'] ]
+  jobs:
+  - job: ValidateInputs
+    displayName: 'Validate Pipeline Inputs'
+    timeoutInMinutes: 15
+    steps:
+    - task: PowerShell@2
+      displayName: 'Validate Required Parameters'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "##[section]🔍 Validating pipeline parameters..."
+          
+          $errors = @()
+          
+          # Validate EA billing account name
+          if ([string]::IsNullOrEmpty("${{ parameters.eaBillingAccountName }}")) {
+              $errors += "EA Billing Account Name is required"
+          }
+          
+          # Validate EA enrollment account name  
+          if ([string]::IsNullOrEmpty("${{ parameters.eaEnrollmentAccountName }}")) {
+              $errors += "EA Enrollment Account Name is required"
+          }
+          
+          # Validate max subscriptions
+          if (${{ parameters.maxSubscriptions }} -lt 1 -or ${{ parameters.maxSubscriptions }} -gt 50) {
+              $errors += "Maximum subscriptions must be between 1 and 50"
+          }
+          
+          # Display validation results
+          if ($errors.Count -gt 0) {
+              Write-Host "##[section]❌ Validation Errors:"
+              $errors | ForEach-Object { 
+                  Write-Host "##vso[task.logissue type=error]• $_"
+              }
+              Write-Host "##vso[task.complete result=Failed;]Pipeline failed due to validation errors"
+              throw "Parameter validation failed"
+          } else {
+              Write-Host "##[section]✅ All parameters validated successfully"
+              
+              # Display parameter summary
+              Write-Host "##[section]📋 Parameter Summary:"
+              Write-Host "• EA Billing Account: ${{ parameters.eaBillingAccountName }}"
+              Write-Host "• EA Enrollment Account: ${{ parameters.eaEnrollmentAccountName }}"
+              Write-Host "• Max Subscriptions: ${{ parameters.maxSubscriptions }}"
+              Write-Host "• Target: Tenant Root"
+              Write-Host "• Naming: Subscription 1, 2, 3, etc."
+              Write-Host "• Dry Run: ${{ parameters.dryRun }}"
+              Write-Host "• Force Create: ${{ parameters.forceCreate }}"
+              Write-Host "• Execution Mode: $(executionMode)"
+              
+              if ("$(executionMode)" -eq "PLAN_ONLY") {
+                  Write-Host "##[section]📋 PLAN ONLY MODE - No subscriptions will be created"
+              } elseif ("${{ parameters.dryRun }}" -eq "true") {
+                  Write-Host "##[section]📋 DRY RUN MODE - No subscriptions will be created"
+              } else {
+                  Write-Host "##[section]🚀 LIVE MODE - Subscriptions will be created after approval"
+              }
+          }
+
+- template: templates/ea-subscription-creation-template.yml
+  parameters:
+    maxSubscriptions: ${{ parameters.maxSubscriptions }}
+    eaBillingAccountName: ${{ parameters.eaBillingAccountName }}
+    eaEnrollmentAccountName: ${{ parameters.eaEnrollmentAccountName }}
+    dryRun: ${{ or(parameters.dryRun, eq(variables.isPR, 'True')) }}
+    forceCreate: ${{ parameters.forceCreate }}
+    runApply: ${{ variables.shouldRunApply }}

@@ -1,0 +1,368 @@
+# Terraform AWS Template for Parallel Pipeline
+# Reusable Azure DevOps Pipeline Template
+
+parameters:
+  - name: terraformAction
+    type: string
+    values:
+      - validate
+      - plan
+      - apply
+      - destroy
+  - name: tenant
+    type: string
+  - name: deploymentType
+    type: string
+  - name: enableAzureIntent
+    type: boolean
+    default: true
+  - name: enableAwsIntent
+    type: boolean
+    default: false
+  - name: awsRegion
+    type: string
+    default: 'us-east-1'
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Install Terraform'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "📦 Installing Terraform $(terraformVersion)..."
+        
+        $terraformVersion = "$(terraformVersion)"
+        
+        # Check if Terraform is already installed and correct version
+        try {
+          $currentVersion = & terraform version -json 2>$null | ConvertFrom-Json | Select-Object -ExpandProperty terraform_version
+          if ($currentVersion -eq $terraformVersion) {
+            Write-Host "✅ Terraform $terraformVersion is already installed"
+            return
+          }
+        } catch {
+          Write-Host "Terraform not found or version mismatch, installing..."
+        }
+        
+        # Detect OS and install appropriate version
+        if ($IsWindows -or $env:OS -eq "Windows_NT" -or $env:AGENT_OS -eq "Windows_NT") {
+          Write-Host "Windows detected, installing Terraform for Windows..."
+          $downloadUrl = "https://releases.hashicorp.com/terraform/${terraformVersion}/terraform_${terraformVersion}_windows_amd64.zip"
+          $zipFile = "terraform.zip"
+          $executableName = "terraform.exe"
+        } else {
+          Write-Host "Linux detected, installing Terraform for Linux..."
+          $downloadUrl = "https://releases.hashicorp.com/terraform/${terraformVersion}/terraform_${terraformVersion}_linux_amd64.zip"
+          $zipFile = "terraform.zip"
+          $executableName = "terraform"
+        }
+        
+        try {
+          # Download Terraform
+          Write-Host "Downloading Terraform from: $downloadUrl"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $zipFile
+          
+          # Extract the executable
+          Write-Host "Extracting Terraform..."
+          Expand-Archive -Path $zipFile -DestinationPath "." -Force
+          
+          # Make sure it's executable and in PATH
+          if (Test-Path $executableName) {
+            $terraformDir = Get-Location
+            $env:PATH = "$terraformDir;$env:PATH"
+            Write-Host "✅ Terraform installed successfully at: $terraformDir"
+            Write-Host "Current PATH includes: $($env:PATH.Split(';')[0..2] -join ';')..."
+            
+            # Verify installation
+            & ".\$executableName" version
+          } else {
+            throw "Terraform executable not found after extraction"
+          }
+          
+          # Cleanup
+          Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+          
+        } catch {
+          Write-Host "❌ Failed to install Terraform: $_"
+          throw
+        }
+
+  - task: PowerShell@2
+    displayName: 'Configure and Verify AWS Credentials'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "🔧 AWS Terraform ${{ parameters.terraformAction }} for ${{ parameters.tenant }}"
+        Write-Host "AWS Region: ${{ parameters.awsRegion }}"
+        Write-Host "Working directory: infrastructure/aws/${{ parameters.deploymentType }}"
+        
+        # Verify AWS credentials are available
+        if (-not $env:AWS_ACCESS_KEY_ID -or -not $env:AWS_SECRET_ACCESS_KEY) {
+          Write-Host "WARNING: AWS credentials not found in environment variables" -ForegroundColor Yellow
+          Write-Host "Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY as pipeline variables" -ForegroundColor Yellow
+          Write-Host "Continuing without credential verification - Terraform will fail if credentials are missing" -ForegroundColor Yellow
+        } else {
+          Write-Host "✅ AWS credentials found" -ForegroundColor Green
+          
+          # Check if AWS CLI is available
+          try {
+            $awsVersion = & aws --version 2>$null
+            Write-Host "AWS CLI found: $awsVersion"
+            
+            # Test AWS credentials
+            Write-Host "Testing AWS credentials..."
+            try {
+              $identity = & aws sts get-caller-identity --output json 2>$null | ConvertFrom-Json
+              Write-Host "✅ AWS credentials valid - Account: $($identity.Account), User: $($identity.Arn)" -ForegroundColor Green
+            } catch {
+              Write-Host "⚠️ AWS credential test failed: $_" -ForegroundColor Yellow
+              Write-Host "Continuing anyway - Terraform will validate credentials" -ForegroundColor Yellow
+            }
+          } catch {
+            Write-Host "⚠️ AWS CLI not found - skipping credential verification" -ForegroundColor Yellow
+            Write-Host "Terraform will validate AWS credentials during execution" -ForegroundColor Yellow
+          }
+        }
+
+  - task: AzureCLI@2
+    displayName: 'AWS Terraform ${{ parameters.terraformAction }}'
+    inputs:
+      azureSubscription: '$(azureServiceConnection)'
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      addSpnToEnvironment: true
+      inlineScript: |
+        # Set Azure authentication using service connection (required by shared intent layer module)
+        $env:ARM_CLIENT_ID = $env:servicePrincipalId
+        $env:ARM_CLIENT_SECRET = $env:servicePrincipalKey
+        $env:ARM_TENANT_ID = $env:tenantId
+        
+        # Extract subscription ID from Azure context (like Azure template does)
+        $context = az account show --output json | ConvertFrom-Json
+        $env:ARM_SUBSCRIPTION_ID = $context.id
+        
+        Write-Host "🔍 Azure authentication for shared intent layer:"
+        Write-Host "  ARM_CLIENT_ID: $($env:ARM_CLIENT_ID.Substring(0, 8))..."
+        Write-Host "  ARM_TENANT_ID: $($env:ARM_TENANT_ID.Substring(0, 8))..."
+        Write-Host "  ARM_SUBSCRIPTION_ID: $($env:ARM_SUBSCRIPTION_ID.Substring(0, 8))..."
+        # Ensure Terraform is available
+        $terraformPath = Get-Command terraform -ErrorAction SilentlyContinue
+        if (-not $terraformPath) {
+          Write-Host "⚠️ Terraform not found in PATH, checking current directory..." -ForegroundColor Yellow
+          if (Test-Path ".\terraform.exe") {
+            $currentDir = Get-Location
+            $env:PATH = "$currentDir;$env:PATH"
+            Write-Host "✅ Added current directory to PATH for Terraform" -ForegroundColor Green
+          } else {
+            Write-Host "❌ Terraform executable not found" -ForegroundColor Red
+            exit 1
+          }
+        } else {
+          Write-Host "✅ Terraform found at: $($terraformPath.Source)" -ForegroundColor Green
+        }
+        
+        Set-Location "infrastructure/aws/${{ parameters.deploymentType }}"
+        Write-Host "Working directory: $(Get-Location)"
+        
+        # Clean up any existing Terraform state and cache to avoid conflicts
+        Write-Host "🧹 Cleaning Terraform cache and state..."
+        if (Test-Path ".terraform") {
+          Remove-Item -Recurse -Force ".terraform" -ErrorAction SilentlyContinue
+          Write-Host "Removed existing .terraform directory"
+        }
+        if (Test-Path ".terraform.lock.hcl") {
+          Remove-Item -Force ".terraform.lock.hcl" -ErrorAction SilentlyContinue
+          Write-Host "Removed existing lock file"
+        }
+        
+        # Initialize Terraform with local backend
+        Write-Host "🔧 Initializing Terraform..."
+        & terraform init -backend-config="../../../config/aws/${{ parameters.tenant }}/local.tfbackend"
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "❌ Terraform initialization failed" -ForegroundColor Red
+          exit 1
+        }
+        Write-Host "✅ Terraform initialized successfully" -ForegroundColor Green
+        
+        # Debug AWS authentication environment variables
+        Write-Host "🔍 Checking AWS authentication environment variables:"
+        Write-Host "  AWS_ACCESS_KEY_ID exists: $($env:AWS_ACCESS_KEY_ID -ne $null)"
+        Write-Host "  AWS_ACCESS_KEY_ID value: $($env:AWS_ACCESS_KEY_ID.Substring(0, [Math]::Min(8, $env:AWS_ACCESS_KEY_ID.Length)))..." -ErrorAction SilentlyContinue
+        Write-Host "  AWS_SECRET_ACCESS_KEY exists: $($env:AWS_SECRET_ACCESS_KEY -ne $null)"
+        Write-Host "  AWS_DEFAULT_REGION: $env:AWS_DEFAULT_REGION"
+        
+        # Check for credential validation issues
+        if (-not $env:AWS_ACCESS_KEY_ID -or $env:AWS_ACCESS_KEY_ID -like "*`$(*") {
+          Write-Host "⚠️ WARNING: AWS_ACCESS_KEY_ID appears to be unresolved variable: $env:AWS_ACCESS_KEY_ID" -ForegroundColor Yellow
+        }
+        
+        # Debug Boolean parameters
+        Write-Host "🔍 Checking Boolean parameters:"
+        Write-Host "  enableAzureIntent parameter: '${{ parameters.enableAzureIntent }}'"
+        Write-Host "  enableAwsIntent parameter: '${{ parameters.enableAwsIntent }}'"
+        
+        # Run the specified action
+        switch ("${{ parameters.terraformAction }}") {
+          "validate" {
+            Write-Host "🔍 Validating Terraform configuration..."
+            & terraform validate
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Terraform validation passed" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Terraform validation failed" -ForegroundColor Red
+              exit 1
+            }
+            
+            Write-Host "🎨 Checking Terraform formatting..."
+            & terraform fmt -check=true
+            $fmtExitCode = $LASTEXITCODE
+            if ($fmtExitCode -eq 0) {
+              Write-Host "✅ Terraform formatting is correct" -ForegroundColor Green
+            } else {
+              Write-Host "⚠️ Terraform formatting issues found. Run 'terraform fmt' to fix." -ForegroundColor Yellow
+              # Don't fail the pipeline for formatting issues in validation
+              Write-Host "Continuing with validation..." -ForegroundColor Yellow
+            }
+            # Reset exit code to success since validation passed
+            $LASTEXITCODE = 0
+          }
+          "plan" {
+            Write-Host "📋 Creating Terraform plan..."
+            
+            # Set intent layer flags (convert to lowercase boolean strings)
+            $azureIntentFlag = if ("${{ parameters.enableAzureIntent }}" -eq "true") { "true" } else { "false" }
+            $awsIntentFlag = if ("${{ parameters.enableAwsIntent }}" -eq "true") { "true" } else { "false" }
+            
+            Write-Host "🎯 Intent Layer Configuration:"
+            Write-Host "  Azure Intent Enabled: $azureIntentFlag"
+            Write-Host "  AWS Intent Enabled: $awsIntentFlag"
+            
+            & terraform plan `
+              -var-file="../../../config/aws/${{ parameters.tenant }}/aws-vars.tfvars" `
+              -var-file="../../../config/shared/${{ parameters.tenant }}/shared-vars.tfvars" `
+              -var="intent_layer_deploy_azure_intent=$azureIntentFlag" `
+              -var="intent_layer_deploy_aws_intent=$awsIntentFlag" `
+              -out=aws-tfplan
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Terraform plan created successfully" -ForegroundColor Green
+              
+              # Convert plan to text format for easy reading
+              Write-Host "📄 Converting plan to text format..."
+              & terraform show -no-color aws-tfplan > terraform-plan-aws-${{ parameters.tenant }}.txt
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✅ Plan text file created: terraform-plan-aws-${{ parameters.tenant }}.txt" -ForegroundColor Green
+              } else {
+                Write-Host "⚠️ Warning: Could not create plan text file" -ForegroundColor Yellow
+              }
+            } else {
+              Write-Host "❌ Terraform plan failed" -ForegroundColor Red
+              exit 1
+            }
+          }
+          "apply" {
+            Write-Host "🚀 Applying Terraform configuration..."
+            
+            # Set intent layer flags with proper boolean conversion
+            $azureIntentFlag = if ("${{ parameters.enableAzureIntent }}" -ieq "True") { "true" } else { "false" }
+            $awsIntentFlag = if ("${{ parameters.enableAwsIntent }}" -ieq "True") { "true" } else { "false" }
+            
+            Write-Host "🎯 Intent Layer Configuration:"
+            Write-Host "  Azure Intent Enabled: $azureIntentFlag"
+            Write-Host "  AWS Intent Enabled: $awsIntentFlag"
+            
+            & terraform apply `
+              -var-file="../../../config/aws/${{ parameters.tenant }}/aws-vars.tfvars" `
+              -var-file="../../../config/shared/${{ parameters.tenant }}/shared-vars.tfvars" `
+              -var="intent_layer_deploy_azure_intent=$azureIntentFlag" `
+              -var="intent_layer_deploy_aws_intent=$awsIntentFlag" `
+              -auto-approve
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Terraform apply completed successfully" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Terraform apply failed" -ForegroundColor Red
+              exit 1
+            }
+          }
+          "destroy" {
+            Write-Host "🗑️ Destroying Terraform resources..."
+            & terraform destroy -var-file="../../../config/aws/${{ parameters.tenant }}/aws-vars.tfvars" -auto-approve
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Terraform destroy completed successfully" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Terraform destroy failed" -ForegroundColor Red
+              exit 1
+            }
+          }
+          default {
+            Write-Host "❌ Unknown Terraform action: ${{ parameters.terraformAction }}" -ForegroundColor Red
+            exit 1
+          }
+        }
+    env:
+      # AWS credentials from variable group
+      AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+      AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish AWS Terraform Plan'
+    inputs:
+      pathToPublish: 'infrastructure/aws/${{ parameters.deploymentType }}/aws-tfplan'
+      artifactName: 'aws-terraform-plan-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+    condition: and(succeeded(), eq('${{ parameters.terraformAction }}', 'plan'))
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish AWS Terraform Plan Text'
+    inputs:
+      pathToPublish: 'infrastructure/aws/${{ parameters.deploymentType }}/terraform-plan-aws-${{ parameters.tenant }}.txt'
+      artifactName: 'aws-terraform-plan-text-${{ parameters.tenant }}-${{ parameters.deploymentType }}'
+    condition: and(succeeded(), eq('${{ parameters.terraformAction }}', 'plan'))
+
+  - task: PowerShell@2
+    displayName: 'AWS Terraform Summary'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Set-Location "infrastructure/aws/${{ parameters.deploymentType }}"
+        Write-Host "📊 AWS Terraform Summary:"
+        
+        # Show state summary if available
+        $stateFile = "C:/agent/terraform-state/platform/terraform.tfstate"
+        if (Test-Path $stateFile) {
+          Write-Host "State file found, generating summary..."
+          try {
+            $stateJson = & terraform show -json | ConvertFrom-Json
+            $resources = $stateJson.values.root_module.resources
+            if ($resources) {
+              $resources | Select-Object -First 20 | ForEach-Object {
+                $name = if ($_.values.name) { $_.values.name } else { $_.values.id }
+                Write-Host "$($_.type): $name"
+              }
+            } else {
+              Write-Host "No resources in state"
+            }
+          } catch {
+            Write-Host "Error reading state: $_"
+          }
+        } else {
+          Write-Host "No state file found yet"
+        }
+        
+        # Show outputs
+        Write-Host "Terraform outputs:"
+        try {
+          $outputs = & terraform output -json | ConvertFrom-Json
+          if ($outputs) {
+            $outputs.PSObject.Properties | ForEach-Object {
+              Write-Host "$($_.Name): $($_.Value.value)"
+            }
+          } else {
+            Write-Host "No outputs available"
+          }
+        } catch {
+          Write-Host "No outputs available"
+        }
+    condition: and(succeeded(), in('${{ parameters.terraformAction }}', 'apply', 'plan'))
